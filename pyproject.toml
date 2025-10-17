@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ransac_benchmark_imc"
+version = "0.1.0"
+description = "A Python package for RANSAC benchmarking"
+requires-python = ">=3.7"
+authors = [
+    {name = "Dmytro Mishkin", email = "ducha.aiki@gmail.com"}
+]
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+
