@@ -44,11 +44,11 @@ try:
 except Exception as e:
     print ("pysuperansac not found")
     pass
-try:
-    import pycolmap
-except Exception as e:
-    print ("pycolmap not found")
-    pass
+#try:
+#    import pycolmap
+#except Exception as e:
+#    print ("pycolmap not found")
+#    pass
 try:
     import pygcransac
 except Exception as e:
@@ -63,12 +63,12 @@ except Exception as e:
     print ("skimage not found")
     pass
 from ransac_benchmark_imc.ransac_numba import ransac_fundamental_numba, ransac_fundamental_loransac_numba, refine_fundamental_nonlinear, refine_fundamental_safe
-
+from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba as ransac_fundamental_loransac_numba_vibe
 
 SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
                      'kornia-gpu-compiled', 'cv2f-ransac', 
                      'cv2f-magsac', 'cv2f-gc', 'cv2eimg', 'superansac',
-                     'numba-new', 'numba-loransac', 'numba-loransac-refine',
+                     'numba-new', 'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
                      'pyransac', 'degensac', 'sklearn-7pt', 'sklearn-8pt', 
                      'poselib', 'pycolmap', 'pvsac', 'sklearn-7pt-numba']
 
@@ -292,14 +292,12 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                                           min_samples=7,
                                                                           max_trials=params['maxiter'],
                                                                           p_success=params['conf'])
-    elif method == 'numba-loransac-refine':
-        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba(src_pts, dst_pts, 
+    elif method == 'numba-loransac-vibesac':
+        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe(src_pts, dst_pts, 
                                                                           params['inl_th'],
                                                                           min_samples=7,
                                                                           max_trials=params['maxiter'],
                                                                           p_success=params['conf'])
-        F= refine_fundamental_safe(F, src_pts[mask_inl], dst_pts[mask_inl])
-
     elif method == 'kornia-gpu-compiled':
         BS = 512
         max_iter_batch = params['maxiter'] // BS 
@@ -500,8 +498,10 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
     IN_DIR = os.path.join(data_dir, split) 
     if not os.path.isdir(OUT_DIR):
         os.makedirs(OUT_DIR)
-    
-    num_cores = int(len(os.sched_getaffinity(0)) * 0.9)
+    try:
+        num_cores = int(len(os.sched_getaffinity(0)) * 0.9)
+    except Exception as e: # macos likely
+        num_cores = int(os.cpu_count() *0.9)
     if method == 'pvsac':
         num_cores = 4
     
