@@ -29,7 +29,10 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
         best_params: Dictionary with best hyperparameters and mAA score
     """
     if inl_ths is None:
-        inl_ths = [0.2, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+        if 'pymagsac' in method:
+            inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 10.0]
+        else:
+            inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
     if match_ths is None:
         match_ths = [0.75, 0.8, 0.85]
     

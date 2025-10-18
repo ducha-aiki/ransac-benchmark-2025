@@ -55,6 +55,11 @@ except Exception as e:
     print ("pygcransac not found")
     pass
 try:
+    import pymagsac
+except Exception as e:
+    print ("pymagsac not found")
+    pass
+try:
     from skimage.measure import ransac as skransac
     from skimage.transform import FundamentalMatrixTransform
     from skimage7pt import FundamentalMatrixTransform7pt
@@ -71,6 +76,7 @@ SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
                      'numba-new', 'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
                      'vibesac2',
                      'pyransac', 'degensac', 'sklearn-7pt', 'sklearn-8pt', 
+                     'pygcransac', 'pymagsac',
                      'poselib', 'pycolmap', 'pvsac', 'sklearn-7pt-numba']
 
 
@@ -199,6 +205,17 @@ def get_multi_resulst_compiled(ms_dict, m_dict, method, params, keys, prosac=Fal
         out_results.append((F, final_inliers, toc - tic))
     return out_results
 
+def get_probabilities(tentatives, assumed_order=True):
+    probabilities = []
+    # Since the correspondences are assumed to be ordered by their SNN ratio a priori,
+    # we just assign a probability according to their order.
+    if assumed_order:
+        arange = np.arange(len(tentatives))
+        probabilities = 1.0 - arange / len(tentatives)
+    else:
+        probabilities = np.ones(len(tentatives)) / len(tentatives)
+    return probabilities
+
 def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2  = None, prosac=False):
     mask = ms <= params['match_th']
     tentatives = m[mask]
@@ -211,6 +228,7 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
         return np.eye(3), np.array([False] * len(mask)), 0
     if prosac:
         from_best = np.argsort(scores)
+        tentatives = tentatives[from_best]
         src_pts = src_pts[from_best]
         dst_pts = dst_pts[from_best]
         tentative_idxs = tentative_idxs[from_best]
@@ -232,6 +250,7 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
             import traceback
             traceback.print_exc()
             print ("Fail!", len(src_pts))
+            toc = time.perf_counter()
             return np.eye(3), np.array([False] * len(mask)), 0
     elif method == 'cv2f-gc':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
@@ -326,6 +345,34 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                 max_iters = params['maxiter'],
                                                 symmetric_error_check=False,
                                                 enable_degeneracy_check=False)
+    elif method  == 'pygcransac':
+        w1 = int(m[:, 0].max()+10)
+        h1 = int(m[:, 1].max()+10)
+        w2 = int(m[:, 2].max()+10)
+        h2 = int(m[:, 3].max()+10)
+        probabilities = get_probabilities(tentatives, assumed_order=prosac)
+        F, mask_inl = pygcransac.findFundamentalMatrix(np.ascontiguousarray(tentatives), 
+                                                       h1, w1, w2, h2,
+                                                       probabilities,
+                                                       threshold=params['inl_th'],
+                                                       conf=params['conf'],
+                                                       max_iters = params['maxiter'],
+                                                       min_iters = min(50, params['maxiter']))
+    elif method  == 'pymagsac':
+        w1 = int(m[:, 0].max()+10)
+        h1 = int(m[:, 1].max()+10)
+        w2 = int(m[:, 2].max()+10)
+        h2 = int(m[:, 3].max()+10)
+        probabilities = get_probabilities(tentatives, assumed_order=prosac)
+        F, mask_inl = pymagsac.findFundamentalMatrix(np.ascontiguousarray(tentatives),
+                                                       h1, w1, w2, h2,
+                                                       probabilities,
+                                                       sampler=4,
+                                                       use_magsac_plus_plus=True,
+                                                       conf=params['conf'],
+                                                       max_iters = params['maxiter'],
+                                                       min_iters = min(50, params['maxiter']),
+                                                       sigma_th=params['inl_th'])
     elif method  == 'pvsac':
         params = pvsac.Params(pvsac.EstimationMethod.Fundamental, 
                               params['inl_th'], params['conf'], params['maxiter'],
@@ -344,7 +391,7 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     elif method  == 'superansac':
         config = pysuperansac.RANSACSettings()
         config.inlier_threshold = params['inl_th']
-        config.min_iterations = min(10, params['maxiter'])
+        config.min_iterations = min(50, params['maxiter'])
         config.max_iterations = params['maxiter']
         config.confidence = params['conf']
         config.sampler = pysuperansac.SamplerType.PROSAC if prosac else pysuperansac.SamplerType.Uniform
@@ -394,7 +441,8 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
             F = F.params
         except Exception as e:
             print ("Fail!", e)
-            return np.eye(3), np.array([False] * len(mask))
+            toc = time.perf_counter()
+            return np.eye(3), np.array([False] * len(mask)), tic-toc
     elif method  == 'sklearn-numba':
         try:
             F, mask_inl = skransac_numba(src_pts, dst_pts, 8, params['inl_th'], params['maxiter'], params['conf'])
@@ -408,6 +456,8 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     if F is not None:
         for i, x in enumerate(mask_inl):
             final_inliers[tentative_idxs[i]] = x
+    else:
+        F = np.eye(3)
     return F, final_inliers, toc - tic
 
 
