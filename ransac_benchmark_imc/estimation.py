@@ -231,6 +231,7 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
             import traceback
             traceback.print_exc()
             print ("Fail!", len(src_pts))
+            toc = time.perf_counter()
             return np.eye(3), np.array([False] * len(mask)), 0
     elif method == 'cv2f-gc':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
@@ -394,7 +395,8 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
             F = F.params
         except Exception as e:
             print ("Fail!", e)
-            return np.eye(3), np.array([False] * len(mask))
+            toc = time.perf_counter()
+            return np.eye(3), np.array([False] * len(mask)), tic-toc
     elif method  == 'sklearn-numba':
         try:
             F, mask_inl = skransac_numba(src_pts, dst_pts, 8, params['inl_th'], params['maxiter'], params['conf'])
