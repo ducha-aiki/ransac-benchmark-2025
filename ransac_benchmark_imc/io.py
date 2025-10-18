@@ -35,7 +35,9 @@ def save_h5(dict_to_save, filename):
     '''Saves dictionary to HDF5 file'''
     with h5py.File(filename, 'w') as f:
         for key in dict_to_save:
-            f.create_dataset(key, data=dict_to_save[key])
+            data=dict_to_save[key]
+            if data is not None:
+                f.create_dataset(key, data=dict_to_save[key])
     return
 
 def get_h_imgpair(key, dataset, split = 'val'):
