@@ -35,6 +35,66 @@ def _rank2_project(F: np.ndarray) -> np.ndarray:
 # =========================
 # Normalization (Hartley)
 # =========================
+@njit(cache=True)
+def run_8point_numba_reuse_dynamic(src: np.ndarray, dst: np.ndarray,
+                                        A_buf: np.ndarray, G_buf: np.ndarray) -> np.ndarray:
+    src_n, T1 = _normalize_points_single(src)
+    dst_n, T2 = _normalize_points_single(dst)
+    M = src_n.shape[0]
+
+    # Use provided A_buf if it fits; else allocate temp (slow path, but rare)
+    if M <= A_buf.shape[0]:
+        A = A_buf
+    else:
+        A = np.empty((M, 9), dtype=np.float64)
+
+    _fill_A_rows(A, src_n, dst_n, M)
+
+    # Build Gram in G_buf (always 9x9)
+    for i in range(9):
+        for j in range(9):
+            s = 0.0
+            for r in range(M):
+                s += A[r, i] * A[r, j]
+            G_buf[i, j] = s
+
+    w, V = np.linalg.eigh(G_buf)
+    v = V[:, 0]
+
+    F = np.empty((3,3), dtype=np.float64)
+    for i in range(3):
+        b = 3*i
+        F[i,0]=v[b+0]; F[i,1]=v[b+1]; F[i,2]=v[b+2]
+    F = _mat33_mul(_mat33_T(T2), _mat33_mul(F, T1))
+    return F
+
+
+@njit(cache=True)
+def run_8point_numba_reuse_dynamic_old(src: np.ndarray, dst: np.ndarray,
+                                   A_buf: np.ndarray) -> np.ndarray:
+    src_n, T1 = _normalize_points_single(src)
+    dst_n, T2 = _normalize_points_single(dst)
+    M = src_n.shape[0]
+
+    # Use the reusable buffer if it fits; otherwise allocate a temporary one
+    if M <= A_buf.shape[0]:
+        A = A_buf
+    else:
+        A = np.empty((M, 9), dtype=np.float64)
+
+    _fill_A_rows(A, src_n, dst_n, M)
+    A_view = A[:M, :]  # safe view
+
+    U, S, Vt = np.linalg.svd(A_view)
+    row = Vt[-1]
+
+    F = np.empty((3, 3), dtype=np.float64)
+    for i in range(3):
+        base = 3*i
+        F[i,0] = row[base+0]; F[i,1] = row[base+1]; F[i,2] = row[base+2]
+    F = _mat33_mul(_mat33_T(T2), _mat33_mul(F, T1))
+    return F
+
 
 @njit(cache=True)
 def _normalize_points_single(pts: np.ndarray):
@@ -179,6 +239,27 @@ def _solve_cubic_real(a3: float, a2: float, a1: float, a0: float, roots_out: np.
             cnt += 1
     return cnt
 
+
+
+@njit(cache=True)
+def _draw_k_unique(N: int, k: int, rng_state: np.int64, out_idx: np.ndarray) -> np.int64:
+    """
+    Uniformly sample k unique indices from range [0, N).
+    - out_idx must be preallocated with length >= k, dtype int64 (or int32 consistently).
+    - Returns the updated rng_state.
+    """
+    visited = np.zeros(N, dtype=np.uint8)   # O(N) tiny bytes, reset each call
+    chosen = 0
+    while chosen < k:
+        rng_state = (np.int64(1103515245) * rng_state + np.int64(12345)) & np.int64(0x7FFFFFFF)
+        j = int(rng_state % np.int64(N))
+        if visited[j] == 0:
+            visited[j] = 1
+            out_idx[chosen] = j
+            chosen += 1
+    return rng_state
+
+
 @njit(cache=True)
 def _seven_point_coeffs_explicit(f1: np.ndarray, f2: np.ndarray, coeffs_out: np.ndarray) -> int:
     """
@@ -318,6 +399,112 @@ def run_7point_numba(points1: np.ndarray, points2: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True)
+def run_7point_numba_reuse(src: np.ndarray, dst: np.ndarray,
+                                A_buf: np.ndarray, G_buf: np.ndarray) -> np.ndarray:
+    out = np.zeros((3,3,3), dtype=np.float64)
+    src_n, T1 = _normalize_points_single(src.astype(np.float64))
+    dst_n, T2 = _normalize_points_single(dst.astype(np.float64))
+    _fill_A_rows(A_buf, src_n, dst_n, 7)
+    w, V = _eig_smallest_vectors_AtA(A_buf, 7, G_buf)
+    row1 = V[:, 0]  # smallest
+    row2 = V[:, 1]  # second smallest
+
+    # Build F1,F2
+    F1 = np.empty((3,3), dtype=np.float64)
+    F2 = np.empty((3,3), dtype=np.float64)
+    for i in range(3):
+        b = 3*i
+        F1[i,0]=row1[b+0]; F1[i,1]=row1[b+1]; F1[i,2]=row1[b+2]
+        F2[i,0]=row2[b+0]; F2[i,1]=row2[b+1]; F2[i,2]=row2[b+2]
+
+    # cubic on f1=v1-v2, f2=v2
+    f1v = np.empty(9, dtype=np.float64); f2v = np.empty(9, dtype=np.float64)
+    for i in range(3):
+        b = 3*i
+        f1v[b+0]=row1[b+0]-row2[b+0]; f1v[b+1]=row1[b+1]-row2[b+1]; f1v[b+2]=row1[b+2]-row2[b+2]
+        f2v[b+0]=row2[b+0];           f2v[b+1]=row2[b+1];           f2v[b+2]=row2[b+2]
+
+    coeffs = np.empty(4, dtype=np.float64)
+    ok = _seven_point_coeffs_explicit(f1v, f2v, coeffs)
+    if ok == 0: return out
+
+    roots = np.zeros(3, dtype=np.float64)
+    n_roots = _solve_cubic_real(coeffs[0], coeffs[1], coeffs[2], coeffs[3], roots)
+
+    for k in range(3):
+        lam = roots[k] if k < n_roots else (roots[0] if n_roots > 0 else 0.0)
+        Fn = lam * F1 + (1.0 - lam) * F2
+        F = _mat33_mul(_mat33_T(T2), _mat33_mul(Fn, T1))
+        out[k] = F
+    return out
+
+
+
+@njit(cache=True)
+def run_7point_numba_reuse_old(src: np.ndarray, dst: np.ndarray,
+                           A_buf: np.ndarray, G_buf: np.ndarray) -> np.ndarray:
+    """
+    src,dst: (7,2)
+    A_buf  : (>=7, 9) reused workspace
+    G_buf  : (9,9) reused Gram matrix buffer
+    Returns: (3,3,3) candidate Fs (no rank-2 projection here; do it after selection)
+    """
+    out = np.zeros((3,3,3), dtype=np.float64)
+
+    src_n, T1 = _normalize_points_single(src.astype(np.float64))
+    dst_n, T2 = _normalize_points_single(dst.astype(np.float64))
+
+    # Fill only first 7 rows
+    _fill_A_rows(A_buf, src_n, dst_n, 7)
+
+    # --- Option A: use SVD (simple, a bit slower)
+    # U, S, Vt = np.linalg.svd(A_buf[:7, :])
+    # row1 = Vt[-2]; row2 = Vt[-1]
+
+    # --- Option B: build G = AᵀA and use eigh (fast & alloc-free)
+    _gram_AtA(A_buf, 7, G_buf)
+    w, V = np.linalg.eigh(G_buf)  # ascending eigenvalues
+    row1 = V[:, 0]                 # smallest
+    row2 = V[:, 1]                 # 2nd smallest
+
+    # Make F1,F2 (3x3)
+    F1 = np.empty((3,3), dtype=np.float64)
+    F2 = np.empty((3,3), dtype=np.float64)
+    for i in range(3):
+        base = 3*i
+        F1[i,0]=row1[base+0]; F1[i,1]=row1[base+1]; F1[i,2]=row1[base+2]
+        F2[i,0]=row2[base+0]; F2[i,1]=row2[base+1]; F2[i,2]=row2[base+2]
+
+    # Prepare cubic
+    f1v = np.empty(9, dtype=np.float64)
+    f2v = np.empty(9, dtype=np.float64)
+    for i in range(3):
+        base = 3*i
+        f1v[base+0] = row1[base+0] - row2[base+0]
+        f1v[base+1] = row1[base+1] - row2[base+1]
+        f1v[base+2] = row1[base+2] - row2[base+2]
+        f2v[base+0] = row2[base+0]
+        f2v[base+1] = row2[base+1]
+        f2v[base+2] = row2[base+2]
+
+    coeffs = np.empty(4, dtype=np.float64)
+    ok = _seven_point_coeffs_explicit(f1v, f2v, coeffs)
+    if ok == 0:
+        return out  # zeros
+
+    roots = np.zeros(3, dtype=np.float64)
+    n_roots = _solve_cubic_real(coeffs[0], coeffs[1], coeffs[2], coeffs[3], roots)
+
+    # Build candidates (defer rank-2 projection & scaling)
+    for k in range(3):
+        lam = roots[k] if k < n_roots else (roots[0] if n_roots > 0 else 0.0)
+        Fn = lam * F1 + (1.0 - lam) * F2
+        F = _mat33_mul(_mat33_T(T2), _mat33_mul(Fn, T1))
+        out[k] = F
+    return out
+
+
+@njit(cache=True)
 def _build_A_N(src_n: np.ndarray, dst_n: np.ndarray) -> np.ndarray:
     N = src_n.shape[0]
     A = np.ones((N, 9), dtype=src_n.dtype)
@@ -419,41 +606,6 @@ def _ransac_max_trials(best_inliers: int, total_points: int, min_samples: int, p
 
 
 @njit(cache=True)
-def _draw_unique_indices_from_mask(mask: np.ndarray, k: int, rng_state: np.int64, out_idx: np.ndarray) -> (np.int64, np.int64):
-    """
-    Sample k unique indices uniformly from set where mask[i]==1.
-    Returns (rng_state, M) where M==k if success, else M<k if not enough inliers.
-    """
-    N = mask.shape[0]
-    M = 0
-    for i in range(N):
-        if mask[i] == 1:
-            M += 1
-    if M < k:
-        return rng_state, np.int64(M)
-
-    inl_idx = np.empty(M, dtype=np.int64)
-    t = 0
-    for i in range(N):
-        if mask[i] == 1:
-            inl_idx[t] = i
-            t += 1
-
-    chosen = 0
-    while chosen < k:
-        rng_state = (np.int64(1103515245) * rng_state + np.int64(12345)) & np.int64(0x7FFFFFFF)
-        j = int(rng_state % np.int64(M))
-        cand = inl_idx[j]
-        ok = True
-        for t2 in range(chosen):
-            if out_idx[t2] == cand:
-                ok = False; break
-        if ok:
-            out_idx[chosen] = cand
-            chosen += 1
-    return rng_state, np.int64(k)
-
-@njit(cache=True)
 def _choose_best_7pt_candidate_stream(F_cands: np.ndarray,
                                       src_all: np.ndarray, dst_all: np.ndarray,
                                       rng_state: np.int64,
@@ -500,34 +652,6 @@ def _choose_best_7pt_candidate_stream(F_cands: np.ndarray,
 
 
 @njit(cache=True)
-def _eigvals_2x2_sym(a11, a12, a22):
-    tr = a11 + a22
-    det = a11 * a22 - a12 * a12
-    disc = tr*tr - 4.0*det
-    if disc < 0.0: disc = 0.0
-    s = np.sqrt(disc)
-    l1 = 0.5*(tr + s); l2 = 0.5*(tr - s)
-    if l2 > l1: l1, l2 = l2, l1
-    return l1, l2
-
-@njit(cache=True)
-def _is_degenerate_minimal(pts: np.ndarray, ratio_thresh: float = 1e-3, extent_thresh: float = 1e-6) -> bool:
-    k = pts.shape[0]
-    cx0 = 0.0; cx1 = 0.0
-    for i in range(k):
-        cx0 += pts[i,0]; cx1 += pts[i,1]
-    cx0 /= k; cx1 /= k
-    s11 = 0.0; s22 = 0.0; s12 = 0.0
-    for i in range(k):
-        dx = pts[i,0]-cx0; dy = pts[i,1]-cx1
-        s11 += dx*dx; s22 += dy*dy; s12 += dx*dy
-    l1, l2 = _eigvals_2x2_sym(s11, s12, s22)
-    tot = l1 + l2
-    if tot < extent_thresh: return True
-    if l1 <= 0.0: return True
-    return (l2 / l1) < ratio_thresh
-
-@njit(cache=True)
 def _fill_A_rows(A: np.ndarray, src_n: np.ndarray, dst_n: np.ndarray, M: int):
     for i in range(M):
         x1, y1 = src_n[i,0], src_n[i,1]
@@ -536,24 +660,107 @@ def _fill_A_rows(A: np.ndarray, src_n: np.ndarray, dst_n: np.ndarray, M: int):
         A[i,3] = y2*x1; A[i,4] = y2*y1; A[i,5] = y2
         A[i,6] = x1;    A[i,7] = y1;    A[i,8] = 1.0
 
+
 @njit(cache=True)
-def run_8point_numba_reuse(src: np.ndarray, dst: np.ndarray, A_buf: np.ndarray) -> np.ndarray:
+def _gather_subset_2col(src: np.ndarray, idx: np.ndarray, k: int, out: np.ndarray):
+    # src: (N,2), idx: (k,), out: (>=k,2)
+    for i in range(k):
+        j = idx[i]
+        out[i, 0] = src[j, 0]
+        out[i, 1] = src[j, 1]
+
+@njit(cache=True)
+def _gram_AtA(A: np.ndarray, M: int, G: np.ndarray):
+    # Compute G = A[:M,:].T @ A[:M,:] into prealloc G (9x9)
+    for i in range(9):
+        for j in range(9):
+            s = 0.0
+            for r in range(M):
+                s += A[r, i] * A[r, j]
+            G[i, j] = s
+            
+
+@njit(cache=True)
+def _eig_smallest_vectors_AtA(A: np.ndarray, M: int, G: np.ndarray):
+    """
+    Fill G with A[:M,:].T @ A[:M,:], then eigendecompose.
+    Returns eigenvalues ascending and eigenvectors (columns).
+    """
+    # G = A[:M,:].T @ A[:M,:]
+    for i in range(9):
+        for j in range(9):
+            s = 0.0
+            for r in range(M):
+                s += A[r, i] * A[r, j]
+            G[i, j] = s
+    w, V = np.linalg.eigh(G)  # ascending eigenvalues
+    return w, V  # columns of V are eigenvectors
+
+@njit(cache=True)
+def run_8point_numba_reuse(src: np.ndarray, dst: np.ndarray,
+                                A_buf: np.ndarray, G_buf: np.ndarray) -> np.ndarray:
     src_n, T1 = _normalize_points_single(src)
     dst_n, T2 = _normalize_points_single(dst)
     M = src_n.shape[0]
-    _fill_A_rows(A_buf, src_n, dst_n, M)          # fill first M rows
-    A = A_buf[:M, :]                               # view, no new alloc
+    _fill_A_rows(A_buf, src_n, dst_n, M)
+    w, V = _eig_smallest_vectors_AtA(A_buf, M, G_buf)
+    vmin = V[:, 0]                    # smallest eigenvalue -> smallest singular value
+    F = np.empty((3,3), dtype=np.float64)
+    for i in range(3):
+        b = 3*i
+        F[i,0]=vmin[b+0]; F[i,1]=vmin[b+1]; F[i,2]=vmin[b+2]
+    # Defer rank-2 until acceptance if you want; for now just denormalize:
+    F = _mat33_mul(_mat33_T(T2), _mat33_mul(F, T1))
+    return F
+
+@njit(cache=True)
+def run_8point_numba_reuse_old(src: np.ndarray, dst: np.ndarray, A_buf: np.ndarray) -> np.ndarray:
+    src_n, T1 = _normalize_points_single(src)
+    dst_n, T2 = _normalize_points_single(dst)
+    M = src_n.shape[0]
+    _fill_A_rows(A_buf, src_n, dst_n, M)   # fill first M rows
+    A = A_buf[:M, :]                       # view (no alloc)
     U, S, Vt = np.linalg.svd(A)
     row = Vt[-1]
     F = np.empty((3,3), dtype=np.float64)
     for i in range(3):
         base = 3*i
         F[i,0]=row[base+0]; F[i,1]=row[base+1]; F[i,2]=row[base+2]
+    # (Optionally defer rank-2 projection & scaling until acceptance)
     F = _mat33_mul(_mat33_T(T2), _mat33_mul(F, T1))
-    F = _rank2_project(F)
-    d = F[2,2]
-    if abs(d) > 1e-8: F = F/(d + 1e-8)
     return F
+
+
+@njit(cache=True)
+def _draw_unique_indices_from_mask_fast(mask: np.ndarray, k: int,
+                                        rng_state: np.int64, out_idx: np.ndarray) -> (np.int64, np.int64):
+    """
+    Sample k unique indices uniformly from positions where mask[i]==1.
+    - Returns (rng_state, got) where got==k on success, <k if not enough inliers.
+    - out_idx is filled with indices into the original array (0..N-1).
+    """
+    N = mask.shape[0]
+    # Count inliers and collect their indices
+    M = 0
+    for i in range(N):
+        if mask[i] == 1:
+            M += 1
+    if M < k:
+        return rng_state, np.int64(M)
+
+    inl_idx = np.empty(M, dtype=np.int64)
+    t = 0
+    for i in range(N):
+        if mask[i] == 1:
+            inl_idx[t] = i
+            t += 1
+
+    # Sample k unique positions in [0..M-1] and map back to original indices
+    tmp_k = np.empty(k, dtype=np.int64)
+    rng_state = _draw_k_unique(M, k, rng_state, tmp_k)
+    for i in range(k):
+        out_idx[i] = inl_idx[tmp_k[i]]
+    return rng_state, np.int64(k)
 
 
 @njit(cache=True)
@@ -592,7 +799,25 @@ def ransac_fundamental_loransac_numba(
     residuals = np.empty(N, dtype=np.float64)
     tmp_mask = np.empty(N, dtype=np.uint8)
     mask_local = np.empty(N, dtype=np.uint8)  # persistent best mask during LO
-    
+    G_buf = np.empty((9, 9), dtype=np.float64)
+    # Shapes
+    k_min = min_samples  # 7 or 8
+    cap = max(lo_sample_size, k_min)
+
+    # Minimal subset tiny buffers (fit both 7 and 8)
+    pts1_min = np.empty((8, 2), dtype=np.float64)
+    pts2_min = np.empty((8, 2), dtype=np.float64)
+
+    # LO subset buffers (size = lo_sample_size)
+    pts1_lo  = np.empty((cap, 2), dtype=np.float64)
+    pts2_lo  = np.empty((cap, 2), dtype=np.float64)
+
+    # One A_buf big enough for ANY subset you'll estimate on (7,8, or LO k)
+    A_buf    = np.empty((cap, 9), dtype=np.float64)
+
+    # If you use the AᵀA + eigh route, preallocate Gram buffer once
+    G_buf    = np.empty((9, 9), dtype=np.float64)
+
 
     # idx_buf must be big enough for both minimal and LO non-minimal sampling
     idx_cap = lo_sample_size if lo_sample_size > min_samples else min_samples
@@ -609,31 +834,22 @@ def ransac_fundamental_loransac_numba(
         trials += 1
         # --- global minimal sample
         k = 0
-        while k < min_samples:
-            rng_state = (np.int64(1103515245) * rng_state + np.int64(12345)) & np.int64(0x7FFFFFFF)
-            j = int(rng_state % np.int64(N))
-            ok = True
-            for t in range(k):
-                if idx_buf[t] == j:
-                    ok = False; break
-            if ok:
-                idx_buf[k] = j
-                k += 1
+        rng_state = _draw_k_unique(N, min_samples, rng_state, idx_buf)
 
-        pts1 = src64[idx_buf[:min_samples], :]
-        pts2 = dst64[idx_buf[:min_samples], :]
-
-        # --- estimate from minimal subset
-        if (_is_degenerate_minimal(pts1) or _is_degenerate_minimal(pts2)):
-            trials += 1
-            continue
-        
-        if use_seven_point and min_samples == 7:
-            F_cands = run_7point_numba(pts1, pts2)
+        # Draw indices -> idx_buf (length >= k_min)
+        # Gather minimal subset into tiny buffers without allocating
+        if k_min == 7:
+            _gather_subset_2col(src64, idx_buf, 7, pts1_min)
+            _gather_subset_2col(dst64, idx_buf, 7, pts2_min)
+            # 7-pt using the same A_buf and G_buf
+            F_cands = run_7point_numba_reuse(pts1_min[:7, :], pts2_min[:7, :], A_buf, G_buf)
             best_k, rng_state = _choose_best_7pt_candidate_stream(F_cands, src64, dst64, rng_state, 64)
             F_est = F_cands[best_k]
         else:
-            F_est = run_8point_numba(pts1, pts2)
+            _gather_subset_2col(src64, idx_buf, 8, pts1_min)
+            _gather_subset_2col(dst64, idx_buf, 8, pts2_min)
+            F_est = run_8point_numba_reuse(pts1_min[:8, :], pts2_min[:8, :], A_buf, G_buf)
+
 
         # --- global scoring
         score, inl_count = _msac_score_and_mask(F_est, src64, dst64, threshold, residuals, tmp_mask)
@@ -675,28 +891,25 @@ def ransac_fundamental_loransac_numba(
 
                     # Draw k_lo unique inliers
                     #rng_state, got = _draw_unique_indices_from_mask(tmp_mask, k_lo, rng_state, idx_buf)
-                    rng_state, got = _draw_unique_indices_from_mask(mask_local, k_lo, rng_state, idx_buf)
+                    rng_state, got = _draw_unique_indices_from_mask_fast(mask_local, k_lo, rng_state, idx_buf)
+
 
                     if got < k_lo:
                         break
                     
                     if degen_count > 8:
                         break
-                    pts1_lo = src64[idx_buf[:k_lo], :]
-                    pts2_lo = dst64[idx_buf[:k_lo], :]
-                    if (_is_degenerate_minimal(pts1_lo) or _is_degenerate_minimal(pts2_lo)):
-                        degen_count+=1
-                        continue
-                    # Estimate on LO subset: prefer 8-point for non-minimal
+                    # k_lo chosen earlier (>=8 preferred; 7 allowed if using 7-pt)
+                    _gather_subset_2col(src64, idx_buf, k_lo, pts1_lo)
+                    _gather_subset_2col(dst64, idx_buf, k_lo, pts2_lo)
+
                     if k_lo >= 8:
-                        F_try = run_8point_numba(pts1_lo, pts2_lo)
-                    elif k_lo == 7 and use_seven_point:
-                        Fc = run_7point_numba(pts1_lo, pts2_lo)
-                        # choose candidate by median on this LO subset
+                        F_try = run_8point_numba_reuse(pts1_lo[:k_lo, :], pts2_lo[:k_lo, :], A_buf, G_buf)
+                    elif k_lo == 7:  # if you allow 7-pt inside LO
+                        Fc = run_7point_numba_reuse(pts1_lo[:7, :], pts2_lo[:7, :], A_buf, G_buf)
                         best_k2, rng_state = _choose_best_7pt_candidate_stream(Fc, src64, dst64, rng_state, 64)
                         F_try = Fc[best_k2]
-                    else:
-                        break  # should not happen
+
 
                     # Score LO candidate under the SAME (tighter) LO threshold
                     score_try, inl_try = _msac_score_and_mask(F_try, src64, dst64, lo_thr, residuals, tmp_mask)
@@ -720,7 +933,7 @@ def ransac_fundamental_loransac_numba(
                             pts1_inl[t, 0] = src64[i, 0]; pts1_inl[t, 1] = src64[i, 1]
                             pts2_inl[t, 0] = dst64[i, 0]; pts2_inl[t, 1] = dst64[i, 1]
                             t += 1
-                    F_local = run_8point_numba(pts1_inl, pts2_inl)
+                    F_local = run_8point_numba_reuse_dynamic(pts1_inl, pts2_inl, A_buf, G_buf)
                     score_local, inl_count_local = _msac_score_and_mask(F_local, src64, dst64, threshold, residuals, tmp_mask)
 
             # Accept improvement (after LO / or just initial improvement)
@@ -742,6 +955,6 @@ def ransac_fundamental_loransac_numba(
                 pts1_inl[t,0] = src64[i,0]; pts1_inl[t,1] = src64[i,1]
                 pts2_inl[t,0] = dst64[i,0]; pts2_inl[t,1] = dst64[i,1]
                 t += 1
-        F_best = run_8point_numba(pts1_inl, pts2_inl)
+        F_local = run_8point_numba_reuse_dynamic(pts1_inl, pts2_inl, A_buf, G_buf)
         best_score, best_inliers_count = _msac_score_and_mask(F_best, src64, dst64, threshold, residuals, inliers_best)
     return F_best, inliers_best, best_inliers_count, best_score, trials
