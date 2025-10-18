@@ -63,12 +63,13 @@ except Exception as e:
     print ("skimage not found")
     pass
 from ransac_benchmark_imc.ransac_numba import ransac_fundamental_numba, ransac_fundamental_loransac_numba, refine_fundamental_nonlinear, refine_fundamental_safe
-from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba as ransac_fundamental_loransac_numba_vibe
+from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe
 
 SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
                      'kornia-gpu-compiled', 'cv2f-ransac', 
                      'cv2f-magsac', 'cv2f-gc', 'cv2eimg', 'superansac',
                      'numba-new', 'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
+                     'vibesac2',
                      'pyransac', 'degensac', 'sklearn-7pt', 'sklearn-8pt', 
                      'poselib', 'pycolmap', 'pvsac', 'sklearn-7pt-numba']
 
@@ -205,14 +206,14 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     src_pts = tentatives[:, :2]
     dst_pts = tentatives[:, 2:]
     scores = ms[mask]
-    
+
+    if tentatives.shape[0] <= 12:
+        return np.eye(3), np.array([False] * len(mask)), 0
     if prosac:
         from_best = np.argsort(scores)
         src_pts = src_pts[from_best]
         dst_pts = dst_pts[from_best]
         tentative_idxs = tentative_idxs[from_best]
-    if tentatives.shape[0] <= 12:
-        return np.eye(3), np.array([False] * len(mask)), 0
     tic = time.perf_counter()
     if method == 'cv2f-ransac':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
@@ -297,7 +298,8 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                                           params['inl_th'],
                                                                           min_samples=7,
                                                                           max_trials=params['maxiter'],
-                                                                          p_success=params['conf'])
+                                                                          p_success=params['conf'],
+                                                                          use_prosac=prosac)
     elif method == 'kornia-gpu-compiled':
         BS = 512
         max_iter_batch = params['maxiter'] // BS 
@@ -428,17 +430,16 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
             out_model[k] = v[0]
             inls[k] = v[1]
             times[k] = v[2]
+    elif False and ('vibesac' in method):
+        results =[]
+        for k in tqdm(keys):
+            v = get_single_result(matches_scores[k], matches[k], method, params, prosac=prosac)
+            results.append(v)
+            out_model[k] = v[0]
+            inls[k] = v[1]
+            times[k] = v[2]
+            sys.exit()
     else:
-        if method in ['pvsac','sklearn-7pt-numba', 'numba-new', 'numba-loransac', 'numba-loransac-refine']:
-            print ("numba warmup")
-            oo = 0
-            for k in tqdm(keys):
-                results = get_single_result(matches_scores[k], matches[k], method, params, prosac=prosac)
-                oo += 1
-                if oo > 100:
-                    break
-            print ("warmup done")
-        #num_cores = 1
         results = Parallel(n_jobs=num_cores,
                            batch_size=BATCH,
                            backend="loky",
@@ -451,9 +452,6 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
             inls[k] = v[1]
             times[k] = v[2]
     return out_model, inls, times
-
-
-
 
 
 def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000, 

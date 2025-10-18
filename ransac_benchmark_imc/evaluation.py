@@ -89,7 +89,10 @@ def evaluate_dir_split(submission_dir, split, data_dir='f_data', num_runs=None, 
         IN_DIR = data_dir
     if not os.path.isdir(OUT_DIR):
         os.makedirs(OUT_DIR)
-    num_cores = int(len(os.sched_getaffinity(0)) * 0.9)
+    try:
+        num_cores = int(len(os.sched_getaffinity(0)) * 0.9)
+    except Exception as e: # macos likely
+        num_cores = int(os.cpu_count() *0.9)
     all_maas = []
     all_times = []
     for run in range(NUM_RUNS):

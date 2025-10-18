@@ -8,7 +8,7 @@ from ransac_benchmark_imc.evaluation import evaluate_dir_split
 from ransac_benchmark_imc.io import load_h5
 
 
-def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, 
+def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=False,
                          data_dir='f_data', inl_ths=None, match_ths=None,
                          test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000],
                          test_confs = [0.99, 0.999, 0.9999]):
@@ -20,6 +20,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
         conf: Confidence level (default: 0.999)
         maxiter: Maximum number of iterations (default: 100000)
         prosac: Use PROSAC sampling (default: False)
+        force: Force recompute if results exist (default: False)
         data_dir: Path to the data directory (default: 'f_data')
         inl_ths: List of inlier thresholds to test (default: [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0])
         match_ths: List of match thresholds to test (default: [0.75, 0.8, 0.85])
@@ -28,7 +29,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
         best_params: Dictionary with best hyperparameters and mAA score
     """
     if inl_ths is None:
-        inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
+        inl_ths = [0.2, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
     if match_ths is None:
         match_ths = [0.75, 0.8, 0.85]
     
@@ -41,6 +42,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
             print(f'inlier threshold = {inl_th}, match threshold={m_th}')
             
             # Run estimation
+
             estimate_dir_split(
                 split='val',
                 method=method,
@@ -49,7 +51,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
                 maxiter=maxiter,
                 match_th=m_th,
                 prosac=prosac,
-                force=False,
+                force=force,
                 data_dir=data_dir
             )
             
@@ -69,42 +71,46 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
                 split='val',
                 data_dir=data_dir,
                 num_runs=None,
-                force=False
+                force=force,
             )
             
             # Load results
             out_maa_final_fname = os.path.join(OUT_DIR, f'maa_FINAL.h5')
             final_res = load_h5(out_maa_final_fname)
-            res[key] = final_res['mAA']
+            res[key] = final_res['mAA'], final_res['time']
     
     # Find best hyperparameters
     max_MAA = 0
     inl_good = 0
     match_good = 0
+    final_time = 0
     for k, v in res.items():
-        if max_MAA < v:
-            max_MAA = v
+        if max_MAA < v[0]:
+            max_MAA = v[0]
+            final_time = v[1]
             pars = k.split('_')
             match_good = float(pars[1])
             inl_good = float(pars[0])
     
     print(f"The best hyperparameters for {method}, conf={conf}, maxIters={maxiter} are")
-    print(f"inlier_th = {inl_good}, snn_ratio = {match_good}. Validation mAA = {max_MAA}")
+    print(f"inlier_th = {inl_good}, snn_ratio = {match_good}. Validation mAA = {max_MAA} time={final_time:.4f}")
     
     # Create submission with best parameters
     print("Creating submission")
+    sys.exit()
     for test_maxiter in test_iters:
         for test_conf in test_confs:
             print (f"Testing with maxiter={test_maxiter}, conf={test_conf}")
             estimate_dir_split(
-                split='test',
+                #split='test',
+                 split='val',
                 method=method,
                 inlier_th=inl_good,
                 conf=test_conf,
                 maxiter=test_maxiter,
                 match_th=match_good,
                 prosac=prosac,
-                force=False,
+                force=force,
                 data_dir=data_dir
             )
     print('Done!')
@@ -113,6 +119,8 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
         'inlier_th': inl_good,
         'match_th': match_good,
         'validation_mAA': max_MAA,
+        'validation_time': final_time,
+        'PROSAC': prosac,
         'all_results': res
     }
 
@@ -141,6 +149,9 @@ if __name__ == '__main__':
     parser.add_argument(
         "--PROSAC", action='store_true',
         help='use PROSAC')
+    parser.add_argument(
+        "--force", action='store_true',
+        help='force recompute if results exist')
     
     args = parser.parse_args()
     
@@ -155,6 +166,7 @@ if __name__ == '__main__':
             test_iters = [100, 200, 500, 1000, 2000, 5000, 10000]
         result = tune_hyperparameters(
             method=method,
+            force=args.force,
             conf=args.conf,
             maxiter=args.maxiter,
             prosac=args.PROSAC,
