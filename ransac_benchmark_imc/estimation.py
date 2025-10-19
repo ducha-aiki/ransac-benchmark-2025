@@ -44,11 +44,11 @@ try:
 except Exception as e:
     print ("pysuperansac not found")
     pass
-#try:
-#    import pycolmap
-#except Exception as e:
-#    print ("pycolmap not found")
-#    pass
+try:
+    import pycolmap
+except Exception as e:
+    print ("pycolmap not found")
+    pass
 try:
     import pygcransac
 except Exception as e:
@@ -67,18 +67,21 @@ try:
 except Exception as e:
     print ("skimage not found")
     pass
-from ransac_benchmark_imc.ransac_numba import ransac_fundamental_numba, ransac_fundamental_loransac_numba, refine_fundamental_nonlinear, refine_fundamental_safe
-from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe
+try:    
+    from ransac_benchmark_imc.ransac_numba import ransac_fundamental_numba, ransac_fundamental_loransac_numba, refine_fundamental_nonlinear, refine_fundamental_safe
+    from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe
+except Exception as e:
+    print ("numba not found, vibesac is not available")
+    pass
 
 SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
                      'kornia-gpu-compiled', 'cv2f-ransac', 
                      'cv2f-magsac', 'cv2f-gc', 'cv2eimg', 'superansac',
                      'numba-new', 'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
-                     'vibesac2',
+                     'vibesac2', 'bansac',
                      'pyransac', 'degensac', 'sklearn-7pt', 'sklearn-8pt', 
                      'pygcransac', 'pymagsac',
                      'poselib', 'pycolmap', 'pvsac', 'sklearn-7pt-numba']
-
 
 def norm_test_data(xs_initial, w1,h1,w2,h2):
     cx1 = (w1 - 1.0) * 0.5
@@ -223,16 +226,16 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     src_pts = tentatives[:, :2]
     dst_pts = tentatives[:, 2:]
     scores = ms[mask]
-
     if tentatives.shape[0] <= 12:
         return np.eye(3), np.array([False] * len(mask)), 0
+    tic = time.perf_counter()
     if prosac:
         from_best = np.argsort(scores)
         tentatives = tentatives[from_best]
         src_pts = src_pts[from_best]
         dst_pts = dst_pts[from_best]
         tentative_idxs = tentative_idxs[from_best]
-    tic = time.perf_counter()
+        scores = scores[from_best]
     if method == 'cv2f-ransac':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.RANSAC, 
@@ -240,18 +243,34 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
     elif method == 'cv2f-magsac':
-        try:
-            F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.USAC_MAGSAC, 
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print ("Fail!", len(src_pts))
-            toc = time.perf_counter()
-            return np.eye(3), np.array([False] * len(mask)), 0
+    elif method == 'bansac-ransac':
+        #
+        bansac_params = cv2.UsacParams()
+        bansac_params.score = cv2.SCORE_METHOD_MAGSAC
+        bansac_params.loMethod = cv2.LOCAL_OPTIM_INNER_AND_ITER_LO
+        bansac_params.threshold = params['inl_th']
+        bansac_params.confidence = params['conf']
+        bansac_params.maxIterations  = params['maxiter']
+        bansac_params.sampler = cv2.SAMPLING_BANSAC
+        bansac_params.weights = 1 -np.array(scores)
+        # BANSAC patches OpenCV, so we will use the original OpenCV function, but under bansac conda environment
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts,  bansac_params)
+    elif method == 'bansac-magsac':
+        bansac_params = cv2.UsacParams()
+        bansac_params.score = cv2.SCORE_METHOD_MAGSAC
+        bansac_params.loMethod = cv2.LOCAL_OPTIM_INNER_AND_ITER_LO
+        bansac_params.threshold = params['inl_th']
+        bansac_params.confidence = params['conf']
+        bansac_params.maxIterations  = params['maxiter']
+        bansac_params.sampler = cv2.SAMPLING_BANSAC
+        bansac_params.weights = 1 -np.array(scores)
+        # BANSAC patches OpenCV, so we will use the original OpenCV function, but under bansac conda environment
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts,  bansac_params)
     elif method == 'cv2f-gc':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.USAC_ACCURATE, 
@@ -270,7 +289,7 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     elif method == 'pycolmap':
         opts = pycolmap.RANSACOptions({'max_error': params['inl_th'], 
                                        'max_num_trials': params['maxiter'],
-                                        'min_num_trials': min(10, params['maxiter']),
+                                        'min_num_trials': min(1000, params['maxiter']),
                                         'confidence': params['conf']})
         res = pycolmap.estimate_fundamental_matrix(src_pts, dst_pts, opts)
         mask_inl = res['inlier_mask']
@@ -379,8 +398,6 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                               pvsac.SamplingMethod.SAMPLING_PROSAC if prosac else pvsac.SamplingMethod.SAMPLING_UNIFORM,
                               pvsac.ScoreMethod.SCORE_METHOD_MSAC)
         F, mask_inl = pvsac.estimate(params, np.ascontiguousarray(src_pts.astype(np.float64)), np.ascontiguousarray(dst_pts.astype(np.float64)), None, None, None, None)
-        #print (F,mask_inl)
-        #mask_inl=mask_inl.astype(bool).flatten()
     elif method  == 'degensac':
         F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
                                                 params['inl_th'],
@@ -480,15 +497,17 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
             out_model[k] = v[0]
             inls[k] = v[1]
             times[k] = v[2]
-    elif False and ('vibesac' in method):
+    elif ('vsac' in method):
         results =[]
-        for k in tqdm(keys):
+        for i,k in enumerate(tqdm(keys)):
+            if i>1580:
+                print (f"{i=} {k=}, input:")
+                print (f'{matches[k]=}')
             v = get_single_result(matches_scores[k], matches[k], method, params, prosac=prosac)
             results.append(v)
             out_model[k] = v[0]
             inls[k] = v[1]
             times[k] = v[2]
-            sys.exit()
     else:
         results = Parallel(n_jobs=num_cores,
                            batch_size=BATCH,

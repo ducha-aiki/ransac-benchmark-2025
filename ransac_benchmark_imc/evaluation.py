@@ -3,6 +3,7 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 from tqdm import tqdm
 import numpy as np
 import argparse
+from joblib import Parallel, delayed
 
 from ransac_benchmark_imc.io import load_h5, save_h5, get_output_dir
 from ransac_benchmark_imc.metrics import get_E_from_F, normalize_keypoints, eval_essential_matrix, calc_mAA_FE
@@ -44,6 +45,47 @@ def evaluate_results(IN_DIR, seq, models, inliers, K1_K2_format=True):
     return ang_errors
 
 
+def process_sequence(seq, run, IN_DIR, OUT_DIR, K1_K2_format, force):
+    """Process a single sequence for evaluation."""
+    print(f'Working on {seq}')
+    in_models_fname = os.path.join(OUT_DIR, f'submission_models_seq_{seq}_run_{run}.h5')
+    in_inliers_fname = os.path.join(OUT_DIR, f'submission_inliers_seq_{seq}_run_{run}.h5')
+    in_times_fname = os.path.join(OUT_DIR, f'submission_times_seq_{seq}_run_{run}.h5')
+    out_errors_fname = os.path.join(OUT_DIR, f'errors_seq_{seq}_run_{run}.h5')
+    out_maa_fname = os.path.join(OUT_DIR, f'maa_seq_{seq}_run_{run}.h5')
+    
+    if os.path.isfile(out_maa_fname) and not force:
+        print(f"Submission file {out_maa_fname} already exists, skipping")
+        res = load_h5(out_maa_fname)
+        if 'time' in res and 'mAA' in res:
+            return res['mAA'], res['time']
+        else:
+            print("Time or mAA not found in the submission file, recomputing")
+    
+    if not os.path.isfile(in_models_fname) or not os.path.isfile(in_inliers_fname):
+        print(f"Submission file {in_inliers_fname} is missing, cannot evaluate, skipping")
+        return None, None
+    
+    models = load_h5(in_models_fname)
+    inlier_masks = load_h5(in_inliers_fname)
+    times = load_h5(in_times_fname)
+    times_arr = np.array(list(times.values()))
+    
+    if os.path.isfile(out_errors_fname) and not force:
+        print(f"Submission file {in_inliers_fname} exists, read it")
+        error = load_h5(out_errors_fname)
+    else:
+        error = evaluate_results(IN_DIR, seq, models, inlier_masks, K1_K2_format)
+    
+    save_h5(error, out_errors_fname)
+    mAA = calc_mAA_FE({seq: error})
+    seq_time = times_arr.mean()
+    print(f" mAA {seq} = {mAA[seq]:.5f}, time = {seq_time:.3f}")
+    save_h5({"mAA": mAA[seq], "time": seq_time}, out_maa_fname)
+    
+    return mAA[seq], seq_time
+
+
 def evaluate_dir_split(submission_dir, split, data_dir='f_data', num_runs=None, force=False):
     """
     Evaluate submissions for a given split.
@@ -72,6 +114,8 @@ def evaluate_dir_split(submission_dir, split, data_dir='f_data', num_runs=None, 
         K1_K2_format = False
 
     OUT_DIR = submission_dir
+    if submission_dir.endswith('.h5'):
+        return 
     out_maa_final_fname = os.path.join(OUT_DIR, f'maa_FINAL.h5')
     if os.path.isfile(out_maa_final_fname) and not force:
         print(f"Submission file {out_maa_final_fname} already exists, skipping")
@@ -85,8 +129,11 @@ def evaluate_dir_split(submission_dir, split, data_dir='f_data', num_runs=None, 
         else:
             print("Time or mAA not found in the submission file, recomputing")
     IN_DIR = os.path.join(data_dir, split)
+    
+    
     if not os.path.isdir(IN_DIR):
         IN_DIR = data_dir
+    
     if not os.path.isdir(OUT_DIR):
         os.makedirs(OUT_DIR)
     try:
@@ -97,46 +144,21 @@ def evaluate_dir_split(submission_dir, split, data_dir='f_data', num_runs=None, 
     all_times = []
     for run in range(NUM_RUNS):
         seqs = [x for x in os.listdir(IN_DIR) if not x.startswith('.')]
-        for seq in seqs:
-            print(f'Working on {seq}')
-            in_models_fname = os.path.join(OUT_DIR, f'submission_models_seq_{seq}_run_{run}.h5')
-            in_inliers_fname = os.path.join(OUT_DIR, f'submission_inliers_seq_{seq}_run_{run}.h5')
-            in_times_fname = os.path.join(OUT_DIR, f'submission_times_seq_{seq}_run_{run}.h5')
-            out_errors_fname = os.path.join(OUT_DIR, f'errors_seq_{seq}_run_{run}.h5')
-            out_maa_fname = os.path.join(OUT_DIR, f'maa_seq_{seq}_run_{run}.h5')
-            if os.path.isfile(out_maa_fname) and not force:
-                print(f"Submission file {out_maa_fname} already exists, skipping")
-                res = load_h5(out_maa_fname)
-                if 'time' in res and 'mAA' in res:
-                    all_maas.append(res['mAA'])
-                    all_times.append(res['time'])
-                    continue
-                else:
-                    print("Time or mAA not found in the submission file, recomputing")
-            if not os.path.isfile(in_models_fname) or not os.path.isfile(in_inliers_fname):
-                print(f"Submission file {in_inliers_fname} is missing, cannot evaluate, skipping")
-                continue
-            models = load_h5(in_models_fname)
-            inlier_masks = load_h5(in_inliers_fname)
-            times = load_h5(in_times_fname)
-            times_arr = np.array(list(times.values()))
-            if os.path.isfile(out_errors_fname) and not force:
-                print(f"Submission file {in_inliers_fname} exists, read it")
-                error = load_h5(out_errors_fname)
-            else:
-                error = evaluate_results(IN_DIR, seq, models, inlier_masks, K1_K2_format)
-            save_h5(error, out_errors_fname)
-            mAA = calc_mAA_FE({seq: error})
-            seq_time = times_arr.mean()
-            print(f" mAA {seq} = {mAA[seq]:.5f}, time = {seq_time:.3f}")
-            save_h5({"mAA": mAA[seq], "time":seq_time}, out_maa_fname)
-            all_maas.append(mAA[seq])
-            all_times.append(seq_time)
+        # Process sequences in parallel
+        results = Parallel(n_jobs=min(num_cores, len(seqs)))(
+            delayed(process_sequence)(seq, run, IN_DIR, OUT_DIR, K1_K2_format, force)
+            for seq in seqs
+        )
+        # Collect results
+        for maa, seq_time in results:
+            if maa is not None and seq_time is not None:
+                all_maas.append(maa)
+                all_times.append(seq_time)
 
     final_mAA = (np.array(all_maas)).mean()
     final_times = np.array(all_times).mean()
-    print(f" mAA total = {final_mAA:.5f} time = {final_times:.5f}")
     save_h5({"mAA": final_mAA, "time":final_times}, out_maa_final_fname)
+    print(f"{submission_dir} mAA total = {final_mAA:.3f} time = {final_times:.4f}")
     print('Done!')
     return final_mAA, final_times
 

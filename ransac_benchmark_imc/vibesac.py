@@ -1404,7 +1404,7 @@ def ransac_fundamental_loransac_numba_refactored(
     lo_sample_size: int = 32,
     # Sampling strategy
     use_prosac: bool = True,
-    refine_nonlinear: bool = True,
+    refine_nonlinear: bool = False,
 ):
     N = src.shape[0]
 

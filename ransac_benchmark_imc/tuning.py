@@ -11,7 +11,8 @@ from ransac_benchmark_imc.io import load_h5
 def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=False,
                          data_dir='f_data', inl_ths=None, match_ths=None,
                          test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000],
-                         test_confs = [0.99, 0.999, 0.9999]):
+                         test_confs = [0.99, 0.999, 0.9999],
+                         skip_submission=False):
     """
     Search for the best hyperparameters on the validation set.
     
@@ -34,7 +35,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
         else:
             inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
     if match_ths is None:
-        match_ths = [0.75, 0.8, 0.85]
+        match_ths = [0.75, 0.8, 0.85, 0.9]
     
     print(f"Searching hypers for {method}, conf={conf}, maxIters={maxiter}")
     
@@ -99,23 +100,25 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
     print(f"inlier_th = {inl_good}, snn_ratio = {match_good}. Validation mAA = {max_MAA} time={final_time:.4f}")
     
     # Create submission with best parameters
-    print("Creating submission")
-    sys.exit()
-    for test_maxiter in test_iters:
-        for test_conf in test_confs:
-            print (f"Testing with maxiter={test_maxiter}, conf={test_conf}")
-            estimate_dir_split(
-                #split='test',
-                 split='val',
-                method=method,
-                inlier_th=inl_good,
-                conf=test_conf,
-                maxiter=test_maxiter,
-                match_th=match_good,
-                prosac=prosac,
-                force=force,
-                data_dir=data_dir
-            )
+    if not skip_submission:
+        print("Creating submission")
+        for test_maxiter in test_iters:
+            for test_conf in test_confs:
+                print (f"Testing with maxiter={test_maxiter}, conf={test_conf}")
+                estimate_dir_split(
+                    split='test',
+                    # split='val',
+                    method=method,
+                    inlier_th=inl_good,
+                    conf=test_conf,
+                    maxiter=test_maxiter,
+                    match_th=match_good,
+                    prosac=prosac,
+                    force=force,
+                    data_dir=data_dir
+                )
+    else:
+        print("Skipping submission")
     print('Done!')
     
     return {
@@ -155,7 +158,9 @@ if __name__ == '__main__':
     parser.add_argument(
         "--force", action='store_true',
         help='force recompute if results exist')
-    
+    parser.add_argument(
+        "--skip_submission", action='store_true',
+        help='skip submission')
     args = parser.parse_args()
     
     # Loop through all methods
@@ -176,7 +181,8 @@ if __name__ == '__main__':
             data_dir=args.data_dir,
             test_iters=test_iters,
            # test_iters=[5000, 10000, 20000, 50000, 100000],
-            test_confs=[0.99, 0.999, 0.9999]
+            test_confs=[0.99, 0.999, 0.9999],
+            skip_submission=args.skip_submission
         )
         all_results[method] = result
         
