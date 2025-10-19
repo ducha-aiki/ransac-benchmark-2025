@@ -12,7 +12,8 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
                          data_dir='f_data', inl_ths=None, match_ths=None,
                          test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000],
                          test_confs = [0.99, 0.999, 0.9999],
-                         skip_submission=False):
+                         skip_submission=False,
+                         predict_prosac_based_on_standard=False):
     """
     Search for the best hyperparameters on the validation set.
     
@@ -32,10 +33,15 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
     if inl_ths is None:
         if 'pymagsac' in method:
             inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 10.0]
+        elif 'vibe' in method:
+            inl_ths = [ 0.75, 1.0, 1.5, 2.0 ]
         else:
             inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
     if match_ths is None:
         match_ths = [0.75, 0.8, 0.85, 0.9]
+        if 'vibe' in method:
+            match_ths = [ 0.8, 0.85, 0.9]
+
     
     print(f"Searching hypers for {method}, conf={conf}, maxIters={maxiter}")
     
@@ -44,9 +50,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
         for inl_th in inl_ths:
             key = f'{inl_th}_{m_th}'
             print(f'inlier threshold = {inl_th}, match threshold={m_th}')
-            
             # Run estimation
-
             estimate_dir_split(
                 split='val',
                 method=method,
@@ -96,9 +100,11 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
             match_good = float(pars[1])
             inl_good = float(pars[0])
     
-    print(f"The best hyperparameters for {method}, conf={conf}, maxIters={maxiter} are")
+    print(f"The best hyperparameters for {method}, conf={conf}, are")
     print(f"inlier_th = {inl_good}, snn_ratio = {match_good}. Validation mAA = {max_MAA} time={final_time:.4f}")
-    
+    use_prosac = prosac
+    if predict_prosac_based_on_standard:
+        use_prosac = False
     # Create submission with best parameters
     if not skip_submission:
         print("Creating submission")
@@ -117,6 +123,19 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
                     force=force,
                     data_dir=data_dir
                 )
+                if predict_prosac_based_on_standard:
+                    print (f"Testing with maxiter={test_maxiter}, conf={test_conf} and prosac=True")
+                    estimate_dir_split(
+                        split='test',
+                        method=method,
+                        inlier_th=inl_good,
+                        conf=test_conf,
+                        maxiter=test_maxiter,
+                        match_th=match_good,
+                        prosac=True,
+                        force=force,
+                        data_dir=data_dir
+                    )
     else:
         print("Skipping submission")
     print('Done!')
@@ -156,6 +175,10 @@ if __name__ == '__main__':
         "--PROSAC", action='store_true',
         help='use PROSAC')
     parser.add_argument(
+        "--predict_prosac_based_on_standard", action='store_true',
+        help='Otherwise prosac selects too loose inliers and is slower, lol')
+    
+    parser.add_argument(
         "--force", action='store_true',
         help='force recompute if results exist')
     parser.add_argument(
@@ -169,7 +192,7 @@ if __name__ == '__main__':
         print(f"\n{'='*80}")
         print(f"Starting hyperparameter tuning for method: {method}")
         print(f"{'='*80}\n")
-        test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000]
+        test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]
         if 'sklearn' in method:
             test_iters = [100, 200, 500, 1000, 2000, 5000, 10000]
         result = tune_hyperparameters(
@@ -181,7 +204,7 @@ if __name__ == '__main__':
             data_dir=args.data_dir,
             test_iters=test_iters,
            # test_iters=[5000, 10000, 20000, 50000, 100000],
-            test_confs=[0.99, 0.999, 0.9999],
+            test_confs=[0.99, 0.9999],
             skip_submission=args.skip_submission
         )
         all_results[method] = result
