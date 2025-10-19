@@ -663,43 +663,112 @@ def _draw_unique_indices_from_mask_fast(mask: np.ndarray, k: int,
 
 
 # ================================
-# PROSAC (only)
+# PROSAC
 # ================================
 
 @njit(cache=True)
-def _prosac_next_pool_size(trial: int, N: int, k: int, max_trials: int) -> int:
-    if N <= k:
-        return N
-    step = max(1, max_trials // (N - k + 1))
-    pool = k + (trial // step)
-    if pool > N: pool = N
-    if pool < k: pool = k
-    return pool
+def _prosac_build_schedule_Tn(N: int, m: int, TN: int,
+                              Tn_int_out: np.ndarray,   # len >= N+1, zeroed on entry
+                              B_boundary_out: np.ndarray):  # len >= N+1, zeroed on entry
+    """
+    Paper-accurate PROSAC schedule (Chum & Matas CVPR'05).
+    Computes the integerized cumulative schedule T'_n and the boundary
+    quota B_n = ceil(T_n - T_{n-1}) for n >= m+1 (B_m := 0).
 
+    Parameters
+    ----------
+    N : total correspondences
+    m : sample size (minimal set size)
+    TN: 'T_N' from the paper = after how many samples PROSAC == RANSAC.
+        In practice, set TN to max_trials (or a large constant like 200000).
+
+    Outputs
+    -------
+    Tn_int_out[n] = T'_n   for n = m..N  (and 0 elsewhere)
+    B_boundary_out[n] = ceil(T_n - T_{n-1}) for n = m+1..N (B_m = 0)
+    """
+    # handle corner cases
+    if N <= 0 or m <= 0:
+        return
+
+    # ----- compute C(N, m) in float safely (m is small: 7 or 8)
+    comb_Nm = 1.0
+    for j in range(1, m+1):
+        # C(N, m) = prod_{j=1..m} (N+1-j)/j
+        comb_Nm *= (N - j + 1) / float(j)
+
+    # T_m = TN * C(m, m) / C(N, m) = TN / C(N, m)
+    T_prev = TN / (comb_Nm + 1e-300)  # avoid 0-div if pathological
+    Tn_int_out[:] = 0
+    B_boundary_out[:] = 0
+    Tn_int_out[m] = 1  # T'_m = 1 (paper)
+
+    # build up to n = N using the exact recurrence  T_{n+1} = ((n+1)/(n+1-m)) * T_n
+    for n in range(m, N):
+        # real-valued next
+        T_next = T_prev * ((n + 1.0) / (n + 1.0 - m))
+        # integerized increment for pool (n+1)
+        inc = int(np.ceil(T_next - T_prev))
+        if inc < 0:   # should not happen, but be safe numerically
+            inc = 0
+        # boundary quota belongs to pool n+1 (include u_{n+1})
+        if n + 1 >= m + 1:
+            B_boundary_out[n + 1] = inc
+        # cumulative schedule
+        Tn_int_out[n + 1] = Tn_int_out[n] + inc
+        # advance
+        T_prev = T_next
+
+    # by construction, T'_N ≈ TN (may differ slightly due to integerization)
+    # B_m := 0 ensures no forced-boundary sampling in the first pool.
 
 @njit(cache=True)
-def _prosac_draw_minimal(
-    N: int, k: int, trial: int, max_trials: int,
-    rng_state: np.int64, out_idx: np.ndarray
+def _prosac_draw_minimal_chum(
+    N: int, m: int, trial: int,  # trial is 0-based here; paper uses 1-based t
+    Tn_int: np.ndarray,          # T'_n from _prosac_build_schedule_Tn
+    B_boundary: np.ndarray,      # boundary quotas per pool
+    rng_state: np.int64,
+    out_idx: np.ndarray
 ) -> np.int64:
-    pool = _prosac_next_pool_size(trial, N, k, max_trials)
-    prev_pool = _prosac_next_pool_size(trial - 1, N, k, max_trials) if trial > 0 else k
+    """
+    Draw the t-th (t = trial+1) PROSAC sample per Chum–Matas:
+      - pool size n = g(t) = min { n : T'_n >= t }
+      - if t is within the 'boundary phase' of pool n (length B_n),
+        force the boundary point u_n and draw m-1 from U_{n-1};
+        else draw m uniformly from U_n.
+    Indices are 0-based: u_1 is at index 0, ..., u_n at index (n-1).
+    """
+    if N <= m:
+        # degenerate: just sample from all N (uniform)
+        return _draw_k_unique(N, m, rng_state, out_idx)
 
-    if pool > prev_pool:
-        # first iteration after the pool grew: draw one sample that contains the boundary
-        boundary = pool - 1
-        if k == 1:
-            out_idx[0] = boundary
+    t1 = trial + 1  # 1-based like the paper
+
+    # ---- g(t): find smallest n with T'_n >= t
+    n = m
+    while n < N and Tn_int[n] < t1:
+        n += 1
+    # now pool is U_n (top-n), indices [0..n-1]
+
+    # boundary phase for this pool has length B_n and starts at (T'_{n-1}+1)
+    T_prev_int = 0 if n == m else Tn_int[n - 1]
+    boundary_len = 0 if n == m else B_boundary[n]
+    in_boundary_phase = (t1 <= T_prev_int + boundary_len)
+
+    if in_boundary_phase and n >= m + 1:
+        # forced boundary: include u_n (index n-1) + (m-1) from U_{n-1} uniformly
+        if m == 1:
+            out_idx[0] = n - 1
             return rng_state
-        tmp = np.empty(k - 1, dtype=np.int64)
-        rng_state = _draw_k_unique(pool - 1, k - 1, rng_state, tmp)
-        for i in range(k - 1):
+        tmp = np.empty(m - 1, dtype=np.int64)
+        rng_state = _draw_k_unique(n - 1, m - 1, rng_state, tmp)
+        for i in range(m - 1):
             out_idx[i] = tmp[i]
-        out_idx[k - 1] = boundary
+        out_idx[m - 1] = n - 1  # boundary point
         return rng_state
 
-    # otherwise, draw uniformly from the pool
-    rng_state = _draw_k_unique(pool, k, rng_state, out_idx)
+    # otherwise: uniform m from U_n
+    rng_state = _draw_k_unique(n, m, rng_state, out_idx)
     return rng_state
 
 
@@ -725,13 +794,18 @@ def _global_sample_and_estimate(
     # PROSAC controls
     use_prosac: bool,
     trial: int,
-    max_trials: int
+    max_trials: int,
+    # NEW: paper-accurate PROSAC schedule
+    prosac_Tn_int: np.ndarray,
+    prosac_B_boundary: np.ndarray
 ) -> (np.ndarray, np.int64, bool):
     N = src_all.shape[0]
 
     # Draw minimal subset
     if use_prosac:
-        rng_state = _prosac_draw_minimal(N, min_samples, trial, max_trials, rng_state, idx_buf)
+        rng_state = _prosac_draw_minimal_chum(
+            N, min_samples, trial, prosac_Tn_int, prosac_B_boundary, rng_state, idx_buf
+        )
     else:
         rng_state = _draw_k_unique(N, min_samples, rng_state, idx_buf)
 
@@ -918,6 +992,17 @@ def ransac_fundamental_loransac_numba_refactored(
     rng_state = np.int64(seed + 1)
     adaptive_cap = max_trials
     trials = 0
+    # --- PROSAC schedule (paper) ---
+    prosac_Tn_int = np.zeros(N + 1, dtype=np.int64)  # T'_n
+    prosac_B_boundary = np.zeros(N + 1, dtype=np.int64)  # ceil(T_n - T_{n-1})
+    #if use_prosac:
+    #    # Use the paper's TN parameter; here we tie it to max_trials (as recommended in practice).
+    #    _prosac_build_schedule_Tn(N, min_samples, max_trials, prosac_Tn_int, prosac_B_boundary)
+    # in ransac_fundamental_loransac_numba_refactored(...)
+    TN_effective = max(np.int64(200000), np.int64(20 * max_trials))
+    if use_prosac:
+        _prosac_build_schedule_Tn(N, min_samples, TN_effective, prosac_Tn_int, prosac_B_boundary)
+
 
     src64 = src.astype(np.float64)
     dst64 = dst.astype(np.float64)
@@ -929,7 +1014,8 @@ def ransac_fundamental_loransac_numba_refactored(
         F_est, rng_state, ok = _global_sample_and_estimate(
             src64, dst64, min_samples, use_seven_point, rng_state,
             idx_buf, pts1_min, pts2_min, A_buf, G_buf, valid_mask,
-            use_prosac, trials - 1, max_trials
+            use_prosac, trials - 1, max_trials,
+            prosac_Tn_int, prosac_B_boundary   # <<< NEW
         )
         if not ok:
             continue
