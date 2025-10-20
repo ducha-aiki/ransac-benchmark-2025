@@ -8,7 +8,7 @@ import h5py
 import cv2
 from tqdm import tqdm
 from ransac_benchmark_imc.metrics import *
-from ransac_benchmark_imc.io import load_h5, save_h5, get_output_dir
+from ransac_benchmark_imc.io import load_h5, save_h5, get_output_dir, load_h5_nested
 
 import argparse
 
@@ -483,6 +483,196 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     return F, final_inliers, toc - tic
 
 
+def get_single_result_roma(m, method, params):
+    tentatives = m
+    tentative_idxs = np.arange(len(tentatives))
+    src_pts = tentatives[:, :2]
+    dst_pts = tentatives[:, 2:]
+    scores = np.ones(len(tentatives))
+    if tentatives.shape[0] <= 12:
+        return np.eye(3), np.array([False] * len(tentatives)), 0
+    tic = time.perf_counter()
+    if method == 'cv2f-ransac':
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
+                                                cv2.RANSAC, 
+                                                ransacReprojThreshold=params['inl_th'],
+                                                confidence=params['conf'],
+                                                maxIters=params['maxiter'])
+    elif method == 'cv2f-magsac':
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
+                                                cv2.USAC_MAGSAC, 
+                                                ransacReprojThreshold=params['inl_th'],
+                                                confidence=params['conf'],
+                                                maxIters=params['maxiter'])
+    elif method == 'bansac-loransac':
+        #
+        scores = np.ones(len(tentatives))
+        bansac_params = cv2.UsacParams()
+        bansac_params.score = cv2.SCORE_METHOD_RANSAC
+        bansac_params.loMethod = cv2.LOCAL_OPTIM_INNER_AND_ITER_LO
+        bansac_params.threshold = params['inl_th']
+        bansac_params.confidence = params['conf']
+        bansac_params.maxIterations  = params['maxiter']
+        bansac_params.sampler = cv2.SAMPLING_BANSAC
+        bansac_params.weights = 1 -np.array(scores)
+        # BANSAC patches OpenCV, so we will use the original OpenCV function, but under bansac conda environment
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts,  bansac_params)
+    elif method == 'cv2f-gc':
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
+                                                cv2.USAC_ACCURATE, 
+                                                ransacReprojThreshold=params['inl_th'],
+                                                confidence=params['conf'],
+                                                maxIters=params['maxiter'])
+    elif method == 'cv2f-magsac':
+        ransac_params = cv2.UsacParams()
+        ransac_params.score = cv2.SCORE_METHOD_MAGSAC
+        ransac_params.loMethod = cv2.LOCAL_OPTIM_SIGMA
+        ransac_params.threshold = params['inl_th']
+        ransac_params.confidence = params['conf']
+        ransac_params.maxIterations  = params['maxiter']
+        ransac_params.sampler = cv2.SAMPLING_UNIFORM
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, ransac_params)
+    elif method == 'poselib':
+        F, info = poselib.estimate_fundamental(src_pts, 
+                                                      dst_pts, {'max_epipolar_error': params['inl_th'], 
+                                                                'progressive_sampling': False,
+                                                                'max_iterations': params['maxiter'],
+                                                                
+                                                                'success_prob': params['conf'],
+                                                                }, {})
+        mask_inl = info['inliers']
+    elif method == 'pycolmap':
+        opts = pycolmap.RANSACOptions({'max_error': params['inl_th'], 
+                                       'max_num_trials': params['maxiter'],
+                                        'min_num_trials': min(1000, params['maxiter']),
+                                        'confidence': params['conf']})
+        res = pycolmap.estimate_fundamental_matrix(src_pts, dst_pts, opts)
+        mask_inl = res['inlier_mask']
+        F = res['F']
+    elif method == 'kornia-cpu':
+        BS = 512
+        max_iter_batch = params['maxiter'] // BS 
+        RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
+                              confidence = params['conf'], 
+                              max_iter = max_iter_batch,
+                              batch_size = BS)
+        pts1 = torch.from_numpy(src_pts).view(-1, 2)
+        pts2 = torch.from_numpy(dst_pts).view(-1, 2)
+        F, mask_inl = RR(pts1.float(), pts2.float())
+        F = F.detach().cpu().numpy().reshape(3,3)
+        mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
+    elif method == 'kornia-gpu':
+        BS = 512
+        max_iter_batch = params['maxiter'] // BS 
+        RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
+                              confidence = params['conf'], 
+                              max_iter = max_iter_batch,
+                              batch_size = BS)
+        pts1 = torch.from_numpy(src_pts).view(-1, 2).float().cuda()
+        pts2 = torch.from_numpy(dst_pts).view(-1, 2).float().cuda()
+        F, mask_inl = RR(pts1, pts2)
+        F = F.detach().cpu().numpy().reshape(3,3)
+        mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
+    elif method == 'vibesac':
+        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe(src_pts, dst_pts, 
+                                                                          params['inl_th'],
+                                                                          min_samples=7,
+                                                                          max_trials=params['maxiter'],
+                                                                          p_success=params['conf'],
+                                                                          use_prosac=False)
+    elif method  == 'pyransac':
+        F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
+                                                px_th=params['inl_th'],
+                                                conf=params['conf'],
+                                                max_iters = params['maxiter'],
+                                                symmetric_error_check=False,
+                                                enable_degeneracy_check=False)
+    elif method  == 'pygcransac':
+        w1 = int(m[:, 0].max()+10)
+        h1 = int(m[:, 1].max()+10)
+        w2 = int(m[:, 2].max()+10)
+        h2 = int(m[:, 3].max()+10)
+        probabilities = get_probabilities(tentatives, assumed_order=False)
+        F, mask_inl = pygcransac.findFundamentalMatrix(np.ascontiguousarray(tentatives), 
+                                                       h1, w1, w2, h2,
+                                                       probabilities,
+                                                       threshold=params['inl_th'],
+                                                       conf=params['conf'],
+                                                       max_iters = params['maxiter'],
+                                                       min_iters = min(50, params['maxiter']))
+    elif method  == 'degensac':
+        F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
+                                                params['inl_th'],
+                                                conf=params['conf'],
+                                                max_iters = params['maxiter'],
+                                                symmetric_error_check=False,
+                                                enable_degeneracy_check=True)
+    elif method  == 'superansac':
+        config = pysuperansac.RANSACSettings()
+        config.inlier_threshold = params['inl_th']
+        config.min_iterations = min(50, params['maxiter'])
+        config.max_iterations = params['maxiter']
+        config.confidence = params['conf']
+        config.sampler = pysuperansac.SamplerType.Uniform
+        config.scoring = pysuperansac.ScoringType.MAGSAC
+        config.local_optimization = pysuperansac.LocalOptimizationType.NestedRANSAC
+        config.final_optimization = pysuperansac.LocalOptimizationType.LSQ
+        config.neighborhood_settings.neighborhood_grid_density = 6
+        config.neighborhood_settings.neighborhood_size = 6
+        w1 = m[:, 0].max()
+        h1 = m[:, 1].max()
+        w2 = m[:, 2].max()
+        h2 = m[:, 3].max()
+        F, mask_inl, score, iterations = pysuperansac.estimateFundamentalMatrix(
+            np.ascontiguousarray(np.concatenate([src_pts, dst_pts], axis=1)), 
+            [w1, h1, w2, h2],
+            scores,
+
+            config = config)
+    elif method  == 'sklearn-7pt':
+        F, mask_inl = skransac([src_pts, dst_pts],
+                    FundamentalMatrixTransform7pt,
+                    min_samples=7,
+                    residual_threshold=params['inl_th'],
+                    max_trials=params['maxiter'],
+                    stop_probability=params['conf'])
+        mask_inl = mask_inl.astype(bool).flatten()
+        F = F.params
+    elif method  == 'sklearn-7pt-numba':
+        F, mask_inl = skransac([src_pts, dst_pts],
+                    FundamentalMatrixTransform7pt_numba,
+                    min_samples=7,
+                    residual_threshold=params['inl_th'],
+                    max_trials=params['maxiter'],
+                    stop_probability=params['conf'])
+        mask_inl = mask_inl.astype(bool).flatten()
+        F = F.params
+    elif method  == 'sklearn-8pt':
+        try:
+            #print(src_pts.shape, dst_pts.shape)
+            F, mask_inl = skransac([src_pts, dst_pts],
+                        FundamentalMatrixTransform,
+                        min_samples=8,
+                        residual_threshold=params['inl_th'],
+                        max_trials=params['maxiter'],
+                        stop_probability=params['conf'])
+            mask_inl = mask_inl.astype(bool).flatten()
+            F = F.params
+        except Exception as e:
+            print ("Fail!", e)
+            toc = time.perf_counter()
+            return np.eye(3), np.array([False] * len(tentatives)), tic-toc
+
+    else:
+        raise ValueError('Unknown method')
+    toc = time.perf_counter()
+    final_inliers = np.array([False] * len(tentatives))
+    if F is not None:
+        for i, x in enumerate(mask_inl):
+            final_inliers[tentative_idxs[i]] = x
+    else:
+        F = np.eye(3)
+    return F, final_inliers, toc - tic
 
         
 def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
@@ -528,8 +718,29 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
     return out_model, inls, times
 
 
+def create_F_submission_roma(IN_DIR, seq, method, params, num_cores):
+    out_model = {}
+    inls = {}
+    times = {}
+    matches = load_h5_nested(f'{IN_DIR}/{seq}/matches_roma_800.h5')
+    keys = [k for k in matches.keys()]
+    BATCH = 32 
+    PRE_DISPATCH = "3*n_jobs"
+    results = Parallel(n_jobs=num_cores,
+                           batch_size=BATCH,
+                           backend="loky",
+                           prefer="processes",
+                           pre_dispatch=PRE_DISPATCH
+                           )(delayed(get_single_result_roma)(matches[k], method, params) for k in tqdm(keys))
+    for i, k in enumerate(keys):
+        v = results[i]
+        out_model[k] = v[0]
+        inls[k] = v[1]
+        times[k] = v[2]
+    return out_model, inls, times
+
 def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000, 
-                       match_th=0.85, prosac=False, force=False, data_dir='f_data'):
+                       match_th=0.85, prosac=False, force=False, data_dir='f_data', roma_data_dir=''):
     """
     Estimate fundamental matrices for a given split using the specified method.
     
@@ -566,8 +777,11 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
     }
     
     problem = 'f'
-    OUT_DIR = get_output_dir(problem, split, method, params)
+    use_roma = len(roma_data_dir) > 0
+    OUT_DIR = get_output_dir(problem, split, method, params, use_roma=len(roma_data_dir) > 0)
     IN_DIR = os.path.join(data_dir, split) 
+    if len(roma_data_dir) > 0:
+        IN_DIR = os.path.join(roma_data_dir, split)
     if not os.path.isdir(OUT_DIR):
         os.makedirs(OUT_DIR)
     try:
@@ -587,11 +801,14 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
             if os.path.isfile(out_models_fname) and not force:
                 print(f"Submission file {out_models_fname} already exists, skipping")
                 continue
-            if 'kornia' in method:
-                with torch.inference_mode():
-                    models, inlier_masks, times = create_F_submission(IN_DIR, seq, method, params, num_cores, prosac)
+            if use_roma:
+                models, inlier_masks, times = create_F_submission_roma(IN_DIR, seq, method, params, num_cores)
             else:
-                models, inlier_masks, times = create_F_submission(IN_DIR, seq, method, params, num_cores, prosac)
+                if 'kornia' in method:
+                    with torch.inference_mode():
+                        models, inlier_masks, times = create_F_submission(IN_DIR, seq, method, params, num_cores, prosac)
+                else:
+                    models, inlier_masks, times = create_F_submission(IN_DIR, seq, method, params, num_cores, prosac)
             save_h5(models, out_models_fname)
             save_h5(inlier_masks, out_inliers_fname)
             save_h5(times, out_times_fname)
@@ -640,6 +857,11 @@ if __name__ == '__main__':
         default='f_data',
         type=str,
         help='path to the data')
+    parser.add_argument(
+        "--roma_data_dir",
+        default='roma_data',
+        type=str,
+        help='path to the data')
     
     args = parser.parse_args()
     
@@ -652,5 +874,6 @@ if __name__ == '__main__':
         match_th=args.match_th,
         prosac=args.PROSAC,
         force=args.force,
-        data_dir=args.data_dir
+        data_dir=args.data_dir,
+        roma_data_dir=args.roma_data_dir
     )
