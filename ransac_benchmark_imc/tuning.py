@@ -194,7 +194,7 @@ if __name__ == '__main__':
         print(f"{'='*80}\n")
         test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]
         if 'sklearn' in method:
-            test_iters = [100, 200, 500, 1000, 2000, 5000, 10000]
+            test_iters = [100, 200, 500, 1000, 2000, 5000]
         result = tune_hyperparameters(
             method=method,
             force=args.force,

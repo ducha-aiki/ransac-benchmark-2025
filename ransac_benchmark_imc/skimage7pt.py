@@ -1,8 +1,10 @@
 import numba as nb
 import numpy as np
+
 from skimage.measure import ransac as skransac
 from skimage.transform import FundamentalMatrixTransform
 
+import numpy as np
 
 # --------------------------
 # NumPy helpers (from before)
@@ -169,6 +171,7 @@ def run_7point_np(points1: np.ndarray, points2: np.ndarray) -> np.ndarray:
     # Final scale normalization
     F_unn = normalize_transformation_np(F_unn).astype(points1.dtype)
     return F_unn
+
 
 
 # --------------------------------

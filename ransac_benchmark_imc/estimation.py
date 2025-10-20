@@ -77,8 +77,8 @@ except Exception as e:
 SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
                      'kornia-gpu-compiled', 'cv2f-ransac', 
                      'cv2f-magsac', 'cv2f-gc', 'cv2eimg', 'superansac',
-                     'numba-new', 'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
-                     'vibesac2', 'bansac',
+                     'numba-new', #'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
+                     'vibesac', 'bansac-loransac',
                      'pyransac', 'degensac', 'sklearn-7pt', 'sklearn-8pt', 
                      'pygcransac', 'pymagsac',
                      'poselib', 'pycolmap', 'pvsac', 'sklearn-7pt-numba']
@@ -248,21 +248,10 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
-    elif method == 'bansac-ransac':
+    elif method == 'bansac-loransac':
         #
         bansac_params = cv2.UsacParams()
-        bansac_params.score = cv2.SCORE_METHOD_MAGSAC
-        bansac_params.loMethod = cv2.LOCAL_OPTIM_INNER_AND_ITER_LO
-        bansac_params.threshold = params['inl_th']
-        bansac_params.confidence = params['conf']
-        bansac_params.maxIterations  = params['maxiter']
-        bansac_params.sampler = cv2.SAMPLING_BANSAC
-        bansac_params.weights = 1 -np.array(scores)
-        # BANSAC patches OpenCV, so we will use the original OpenCV function, but under bansac conda environment
-        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts,  bansac_params)
-    elif method == 'bansac-magsac':
-        bansac_params = cv2.UsacParams()
-        bansac_params.score = cv2.SCORE_METHOD_MAGSAC
+        bansac_params.score = cv2.SCORE_METHOD_RANSAC
         bansac_params.loMethod = cv2.LOCAL_OPTIM_INNER_AND_ITER_LO
         bansac_params.threshold = params['inl_th']
         bansac_params.confidence = params['conf']
@@ -277,6 +266,15 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
+    elif method == 'cv2f-magsac':
+        ransac_params = cv2.UsacParams()
+        ransac_params.score = cv2.SCORE_METHOD_MAGSAC
+        ransac_params.loMethod = cv2.LOCAL_OPTIM_SIGMA
+        ransac_params.threshold = params['inl_th']
+        ransac_params.confidence = params['conf']
+        ransac_params.maxIterations  = params['maxiter']
+        ransac_params.sampler = cv2.SAMPLING_PROSAC if prosac else cv2.SAMPLING_UNIFORM
+        F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, ransac_params)
     elif method == 'poselib':
         F, info = poselib.estimate_fundamental(src_pts, 
                                                       dst_pts, {'max_epipolar_error': params['inl_th'], 
@@ -318,45 +316,52 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
         F, mask_inl = RR(pts1, pts2)
         F = F.detach().cpu().numpy().reshape(3,3)
         mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
-    elif method == 'numba-new':
-        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_numba(src_pts, dst_pts, 
-                                                                          params['inl_th'],
-                                                                          min_samples=7,
-                                                                          max_trials=params['maxiter'],
-                                                                          p_success=params['conf'],
-                                                                          use_seven_point=True, msac=True)
-    elif method == 'numba-loransac':
-        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba(src_pts, dst_pts, 
-                                                                          params['inl_th'],
-                                                                          min_samples=7,
-                                                                          max_trials=params['maxiter'],
-                                                                          p_success=params['conf'])
-    elif method == 'numba-loransac-vibesac':
+    elif method == 'vibesac':
         F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe(src_pts, dst_pts, 
                                                                           params['inl_th'],
                                                                           min_samples=7,
                                                                           max_trials=params['maxiter'],
                                                                           p_success=params['conf'],
                                                                           use_prosac=prosac)
-    elif method == 'kornia-gpu-compiled':
-        BS = 512
-        max_iter_batch = params['maxiter'] // BS 
-        RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
-                              confidence = params['conf'], 
-                              max_iter = max_iter_batch,
-                              batch_size = BS)
-        pts1 = torch.from_numpy(src_pts).view(-1, 2).float().cuda()
-        pts2 = torch.from_numpy(dst_pts).view(-1, 2).float().cuda()
-        F, mask_inl = RR(pts1, pts2)
-        F = F.detach().cpu().numpy().reshape(3,3)
-        mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
-    elif method == 'cv2eimg':
-        tent_norm, T1, T2 = norm_test_data(tentatives, w1,h1,w2,h2)
-        E, mask_inl = cv2.findEssentialMat(tent_norm[:, :2], tent_norm[:, 2:], 
-                                           np.eye(3), cv2.RANSAC, 
-                                           threshold=params['inl_th'],
-                                           prob=params['conf'])
-        F = np.matmul(np.matmul(T2.T, E), T1)
+    # elif method == 'numba-new':
+    #     F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_numba(src_pts, dst_pts, 
+    #                                                                       params['inl_th'],
+    #                                                                       min_samples=7,
+    #                                                                       max_trials=params['maxiter'],
+    #                                                                       p_success=params['conf'],
+    #                                                                       use_seven_point=True, msac=True)
+    # elif method == 'numba-loransac':
+    #     F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba(src_pts, dst_pts, 
+    #                                                                       params['inl_th'],
+    #                                                                       min_samples=7,
+    #                                                                       max_trials=params['maxiter'],
+    #                                                                       p_success=params['conf'])
+    # elif method == 'numba-loransac-vibesac':
+    #     F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe(src_pts, dst_pts, 
+    #                                                                       params['inl_th'],
+    #                                                                       min_samples=7,
+    #                                                                       max_trials=params['maxiter'],
+    #                                                                       p_success=params['conf'],
+    #                                                                       use_prosac=prosac)
+    # elif method == 'kornia-gpu-compiled':
+    #     BS = 512
+    #     max_iter_batch = params['maxiter'] // BS 
+    #     RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
+    #                           confidence = params['conf'], 
+    #                           max_iter = max_iter_batch,
+    #                           batch_size = BS)
+    #     pts1 = torch.from_numpy(src_pts).view(-1, 2).float().cuda()
+    #     pts2 = torch.from_numpy(dst_pts).view(-1, 2).float().cuda()
+    #     F, mask_inl = RR(pts1, pts2)
+    #     F = F.detach().cpu().numpy().reshape(3,3)
+    #     mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
+    # elif method == 'cv2eimg':
+    #     tent_norm, T1, T2 = norm_test_data(tentatives, w1,h1,w2,h2)
+    #     E, mask_inl = cv2.findEssentialMat(tent_norm[:, :2], tent_norm[:, 2:], 
+    #                                        np.eye(3), cv2.RANSAC, 
+    #                                        threshold=params['inl_th'],
+    #                                        prob=params['conf'])
+    #     F = np.matmul(np.matmul(T2.T, E), T1)
     elif method  == 'pyransac':
         F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
                                                 px_th=params['inl_th'],
@@ -377,27 +382,27 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                        conf=params['conf'],
                                                        max_iters = params['maxiter'],
                                                        min_iters = min(50, params['maxiter']))
-    elif method  == 'pymagsac':
-        w1 = int(m[:, 0].max()+10)
-        h1 = int(m[:, 1].max()+10)
-        w2 = int(m[:, 2].max()+10)
-        h2 = int(m[:, 3].max()+10)
-        probabilities = get_probabilities(tentatives, assumed_order=prosac)
-        F, mask_inl = pymagsac.findFundamentalMatrix(np.ascontiguousarray(tentatives),
-                                                       h1, w1, w2, h2,
-                                                       probabilities,
-                                                       sampler=4,
-                                                       use_magsac_plus_plus=True,
-                                                       conf=params['conf'],
-                                                       max_iters = params['maxiter'],
-                                                       min_iters = min(50, params['maxiter']),
-                                                       sigma_th=params['inl_th'])
-    elif method  == 'pvsac':
-        params = pvsac.Params(pvsac.EstimationMethod.Fundamental, 
-                              params['inl_th'], params['conf'], params['maxiter'],
-                              pvsac.SamplingMethod.SAMPLING_PROSAC if prosac else pvsac.SamplingMethod.SAMPLING_UNIFORM,
-                              pvsac.ScoreMethod.SCORE_METHOD_MSAC)
-        F, mask_inl = pvsac.estimate(params, np.ascontiguousarray(src_pts.astype(np.float64)), np.ascontiguousarray(dst_pts.astype(np.float64)), None, None, None, None)
+    # elif method  == 'pymagsac':
+    #     w1 = int(m[:, 0].max()+10)
+    #     h1 = int(m[:, 1].max()+10)
+    #     w2 = int(m[:, 2].max()+10)
+    #     h2 = int(m[:, 3].max()+10)
+    #     probabilities = get_probabilities(tentatives, assumed_order=prosac)
+    #     F, mask_inl = pymagsac.findFundamentalMatrix(np.ascontiguousarray(tentatives),
+    #                                                    h1, w1, w2, h2,
+    #                                                    probabilities,
+    #                                                    sampler=4,
+    #                                                    use_magsac_plus_plus=True,
+    #                                                    conf=params['conf'],
+    #                                                    max_iters = params['maxiter'],
+    #                                                    min_iters = min(50, params['maxiter']),
+    #                                                    sigma_th=params['inl_th'])
+    # elif method  == 'pvsac':
+    #     params = pvsac.Params(pvsac.EstimationMethod.Fundamental, 
+    #                           params['inl_th'], params['conf'], params['maxiter'],
+    #                           pvsac.SamplingMethod.SAMPLING_PROSAC if prosac else pvsac.SamplingMethod.SAMPLING_UNIFORM,
+    #                           pvsac.ScoreMethod.SCORE_METHOD_MSAC)
+    #     F, mask_inl = pvsac.estimate(params, np.ascontiguousarray(src_pts.astype(np.float64)), np.ascontiguousarray(dst_pts.astype(np.float64)), None, None, None, None)
     elif method  == 'degensac':
         F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
                                                 params['inl_th'],
