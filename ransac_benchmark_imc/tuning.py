@@ -8,12 +8,17 @@ from ransac_benchmark_imc.evaluation import evaluate_dir_split
 from ransac_benchmark_imc.io import load_h5
 
 
-def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=False,
+
+def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, 
+                         problem='f',
+                         use_sift_inl_th_for_roma=False,
+                         force=False,
                          data_dir='f_data', inl_ths=None, match_ths=None,
                          test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000],
                          test_confs = [0.99, 0.999, 0.9999],
                          skip_submission=False,
-                         predict_prosac_based_on_standard=False):
+                         predict_prosac_based_on_standard=False,
+                         roma_data_dir=''):
     """
     Search for the best hyperparameters on the validation set.
     
@@ -33,19 +38,39 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
     if inl_ths is None:
         if 'pymagsac' in method:
             inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 10.0]
-        elif 'vibe' in method:
-            inl_ths = [ 0.75, 1.0, 1.5, 2.0 ]
+        #elif 'vibe' in method:
+        #    inl_ths = [ 0.75, 1.0, 1.5, 2.0 ]
+        elif method in [ 'cv2f-magsac']:
+            inl_ths = [ 0.25 ]
+        elif method in [ 'cv2f-ransac']:
+            inl_ths = [ 0.5 ]
+        elif method in [ 'vibesac', 'vibesac-cuda']:
+            inl_ths = [ 1.5 ]
+        elif method in [ 'poselib']:
+            inl_ths = [ 1.0]
+        elif method in [ 'degensac', 'pycolmap']:
+            inl_ths = [ 0.5]
+        elif method in [ 'kornia-cpu', 'kornia-gpu']:
+            inl_ths = [0.5, 0.75, 1.0, 2.0]
+        
+        
+        
         else:
             inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
     if match_ths is None:
         match_ths = [0.75, 0.8, 0.85, 0.9]
         if 'vibe' in method:
             match_ths = [ 0.8, 0.85, 0.9]
-
-    
+        if 'kornia' in method:
+            match_ths = [0.75,  0.8,  0.85]
+    use_roma = len(roma_data_dir) > 0
+    if use_roma:
+        match_ths = [0.8] # it doesn't matter,the is no snn in roma
     print(f"Searching hypers for {method}, conf={conf}, maxIters={maxiter}")
     
     res = {}
+    if problem == 'e':
+        inl_ths = np.array(inl_ths) * 1e-4
     for m_th in match_ths:
         for inl_th in inl_ths:
             key = f'{inl_th}_{m_th}'
@@ -53,6 +78,7 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
             # Run estimation
             estimate_dir_split(
                 split='val',
+                problem=problem,
                 method=method,
                 inlier_th=inl_th,
                 conf=conf,
@@ -60,7 +86,8 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
                 match_th=m_th,
                 prosac=prosac,
                 force=force,
-                data_dir=data_dir
+                data_dir=data_dir,
+                roma_data_dir=roma_data_dir
             )
             
             # Get output directory
@@ -71,15 +98,17 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
                 "match_th": m_th,
                 "PROSAC": prosac
             }
-            OUT_DIR = get_output_dir('f', 'val', method, params)
+            OUT_DIR = get_output_dir(problem, 'val', method, params, use_roma=use_roma)
             
             # Run evaluation
             evaluate_dir_split(
                 submission_dir=OUT_DIR,
                 split='val',
                 data_dir=data_dir,
+                matrix_type=problem,
                 num_runs=None,
                 force=force,
+                roma_dir = roma_data_dir
             )
             
             # Load results
@@ -112,8 +141,9 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
             for test_conf in test_confs:
                 print (f"Testing with maxiter={test_maxiter}, conf={test_conf}")
                 estimate_dir_split(
-                    split='test',
-                    # split='val',
+                   # split='test',
+                    split='val',
+                    problem=problem,
                     method=method,
                     inlier_th=inl_good,
                     conf=test_conf,
@@ -121,13 +151,15 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False, force=F
                     match_th=match_good,
                     prosac=prosac,
                     force=force,
-                    data_dir=data_dir
+                    data_dir=data_dir,
+                    roma_data_dir=roma_data_dir
                 )
-                if predict_prosac_based_on_standard:
+                if predict_prosac_based_on_standard and not use_roma:
                     print (f"Testing with maxiter={test_maxiter}, conf={test_conf} and prosac=True")
                     estimate_dir_split(
                         split='test',
                         method=method,
+                        problem=problem,
                         inlier_th=inl_good,
                         conf=test_conf,
                         maxiter=test_maxiter,
@@ -162,22 +194,35 @@ if __name__ == '__main__':
         type=str,
         help='path to the data')
     parser.add_argument(
+        "--problem",
+        default='f',
+        choices=['f', 'e', 'h', 'pnp'],
+        type=str,
+        help='problem to run on. Can be f or e')
+    parser.add_argument(
         "--conf",
         default=0.999,
         type=float,
         help='confidence. Default is 0.999')
     parser.add_argument(
         "--maxiter",
-        default=2000,
+        default=1000,
         type=int,
-        help='max iter. Default is 100000')
+        help='max iter. Default is 1000')
+    parser.add_argument(
+        "--roma_data_dir",
+        default='',
+        type=str,
+        help='path to the roma data')
     parser.add_argument(
         "--PROSAC", action='store_true',
         help='use PROSAC')
     parser.add_argument(
         "--predict_prosac_based_on_standard", action='store_true',
         help='Otherwise prosac selects too loose inliers and is slower, lol')
-    
+    parser.add_argument(
+        "--use_sift_inl_th_for_roma", action='store_true',
+        help='use sift inlier threshold for roma')
     parser.add_argument(
         "--force", action='store_true',
         help='force recompute if results exist')
@@ -195,14 +240,19 @@ if __name__ == '__main__':
         test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]
         if 'sklearn' in method:
             test_iters = [100, 200, 500, 1000, 2000, 5000]
+        if len(args.roma_data_dir)>0:
+            test_iters = [100, 200, 500, 1000, 2000]
         result = tune_hyperparameters(
             method=method,
             force=args.force,
             conf=args.conf,
             maxiter=args.maxiter,
             prosac=args.PROSAC,
+            problem=args.problem,
+            use_sift_inl_th_for_roma=args.use_sift_inl_th_for_roma,
             data_dir=args.data_dir,
             test_iters=test_iters,
+            roma_data_dir=args.roma_data_dir,
            # test_iters=[5000, 10000, 20000, 50000, 100000],
             test_confs=[0.99, 0.9999],
             skip_submission=args.skip_submission

@@ -31,6 +31,24 @@ def load_h5(filename):
             dict_to_load[key] = f[key][()]
     return dict_to_load
 
+def load_h5_nested(filename):
+    '''Loads dictionary from hdf5 file'''
+    dict_to_load = {}
+    if not os.path.isfile(filename):
+        print('Cannot find file {}'.format(filename))
+        return None
+    dict_to_load= {}
+    with h5py.File(filename, 'r') as f:
+        keys = [key for key in f.keys()]
+        for key in keys:
+            dd = f[key]
+            for k in dd.keys():
+                matches = dd[k][()]
+                final_key = f'{key}-{k}'
+                dict_to_load[final_key] = matches
+    return dict_to_load
+
+
 def save_h5(dict_to_save, filename):
     '''Saves dictionary to HDF5 file'''
     with h5py.File(filename, 'w') as f:
@@ -67,7 +85,7 @@ def get_h_imgpair2(key, DIR):
     img2 = cv2.cvtColor(cv2.imread(img2_fname), cv2.COLOR_BGR2RGB)
     return img1, img2
 
-def get_output_dir(problem: str, split: str, method: str, params: dict):
+def get_output_dir(problem: str, split: str, method: str, params: dict, use_roma: bool = False):
     problem = problem.lower()
     if problem not in ['e', 'f', 'h', 'pnp']:
         raise ValueError(f'{problem} is unknown problem. Try e, f, h, or pnp')
@@ -75,4 +93,6 @@ def get_output_dir(problem: str, split: str, method: str, params: dict):
     sorted_keys = sorted([str(x) for x in params.keys()])
     for k in sorted_keys:
         param_string += f'_{k}-{str(params[k])}'
+    if use_roma:
+        problem += '_roma'
     return os.path.join('results', split, problem, method, param_string)

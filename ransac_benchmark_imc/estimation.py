@@ -28,6 +28,7 @@ try:
 except Exception as e:
     print ("poselib not found")
     pass
+import kornia.geometry as KG
 try:
     import torch
     import kornia.geometry as KG
@@ -68,17 +69,18 @@ except Exception as e:
     print ("skimage not found")
     pass
 try:    
-    from ransac_benchmark_imc.ransac_numba import ransac_fundamental_numba, ransac_fundamental_loransac_numba, refine_fundamental_nonlinear, refine_fundamental_safe
     from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe
+    from ransac_benchmark_imc.vibesac_cuda import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe_cuda
 except Exception as e:
     print ("numba not found, vibesac is not available")
     pass
 
 SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
-                     'kornia-gpu-compiled', 'cv2f-ransac', 
-                     'cv2f-magsac', 'cv2f-gc', 'cv2eimg', 'superansac',
+                     'kornia-gpu-compiled', 'cv2-ransac', 
+                     'cv2-magsac', 'cv2-gc',  'superansac',
                      'numba-new', #'numba-loransac', 'numba-loransac-refine','numba-loransac-vibesac',
                      'vibesac', 'bansac-loransac',
+                     'vibesac-cuda',
                      'pyransac', 'degensac', 'sklearn-7pt', 'sklearn-8pt', 
                      'pygcransac', 'pymagsac',
                      'poselib', 'pycolmap', 'pvsac', 'sklearn-7pt-numba']
@@ -219,6 +221,7 @@ def get_probabilities(tentatives, assumed_order=True):
         probabilities = np.ones(len(tentatives)) / len(tentatives)
     return probabilities
 
+
 def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2  = None, prosac=False):
     mask = ms <= params['match_th']
     tentatives = m[mask]
@@ -236,13 +239,13 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
         dst_pts = dst_pts[from_best]
         tentative_idxs = tentative_idxs[from_best]
         scores = scores[from_best]
-    if method == 'cv2f-ransac':
+    if method == 'cv2-ransac':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.RANSAC, 
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
-    elif method == 'cv2f-magsac':
+    elif method == 'cv2-magsac':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.USAC_MAGSAC, 
                                                 ransacReprojThreshold=params['inl_th'],
@@ -260,13 +263,13 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
         bansac_params.weights = 1 -np.array(scores)
         # BANSAC patches OpenCV, so we will use the original OpenCV function, but under bansac conda environment
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts,  bansac_params)
-    elif method == 'cv2f-gc':
+    elif method == 'cv2-gc':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.USAC_ACCURATE, 
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
-    elif method == 'cv2f-magsac':
+    elif method == 'cv2-magsac':
         ransac_params = cv2.UsacParams()
         ransac_params.score = cv2.SCORE_METHOD_MAGSAC
         ransac_params.loMethod = cv2.LOCAL_OPTIM_SIGMA
@@ -301,11 +304,16 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                               batch_size = BS)
         pts1 = torch.from_numpy(src_pts).view(-1, 2)
         pts2 = torch.from_numpy(dst_pts).view(-1, 2)
+        #from torch.profiler import profile, ProfilerActivity, record_function
+        #with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        #    with record_function("model_inference"):
         F, mask_inl = RR(pts1.float(), pts2.float())
+        #print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        #sys.exit()
         F = F.detach().cpu().numpy().reshape(3,3)
         mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
     elif method == 'kornia-gpu':
-        BS = 512
+        BS = 1024
         max_iter_batch = params['maxiter'] // BS 
         RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
                               confidence = params['conf'], 
@@ -313,7 +321,15 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                               batch_size = BS)
         pts1 = torch.from_numpy(src_pts).view(-1, 2).float().cuda()
         pts2 = torch.from_numpy(dst_pts).view(-1, 2).float().cuda()
+        #torch.cuda.synchronize()
+        #from torch.profiler import profile, ProfilerActivity, record_function
+        #with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        #    with record_function("model_inference"): 
         F, mask_inl = RR(pts1, pts2)
+        #torch.cuda.synchronize()
+        #print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        #print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+        #sys.exit()
         F = F.detach().cpu().numpy().reshape(3,3)
         mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
     elif method == 'vibesac':
@@ -323,45 +339,14 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
                                                                           max_trials=params['maxiter'],
                                                                           p_success=params['conf'],
                                                                           use_prosac=prosac)
-    # elif method == 'numba-new':
-    #     F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_numba(src_pts, dst_pts, 
-    #                                                                       params['inl_th'],
-    #                                                                       min_samples=7,
-    #                                                                       max_trials=params['maxiter'],
-    #                                                                       p_success=params['conf'],
-    #                                                                       use_seven_point=True, msac=True)
-    # elif method == 'numba-loransac':
-    #     F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba(src_pts, dst_pts, 
-    #                                                                       params['inl_th'],
-    #                                                                       min_samples=7,
-    #                                                                       max_trials=params['maxiter'],
-    #                                                                       p_success=params['conf'])
-    # elif method == 'numba-loransac-vibesac':
-    #     F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe(src_pts, dst_pts, 
-    #                                                                       params['inl_th'],
-    #                                                                       min_samples=7,
-    #                                                                       max_trials=params['maxiter'],
-    #                                                                       p_success=params['conf'],
-    #                                                                       use_prosac=prosac)
-    # elif method == 'kornia-gpu-compiled':
-    #     BS = 512
-    #     max_iter_batch = params['maxiter'] // BS 
-    #     RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
-    #                           confidence = params['conf'], 
-    #                           max_iter = max_iter_batch,
-    #                           batch_size = BS)
-    #     pts1 = torch.from_numpy(src_pts).view(-1, 2).float().cuda()
-    #     pts2 = torch.from_numpy(dst_pts).view(-1, 2).float().cuda()
-    #     F, mask_inl = RR(pts1, pts2)
-    #     F = F.detach().cpu().numpy().reshape(3,3)
-    #     mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
-    # elif method == 'cv2eimg':
-    #     tent_norm, T1, T2 = norm_test_data(tentatives, w1,h1,w2,h2)
-    #     E, mask_inl = cv2.findEssentialMat(tent_norm[:, :2], tent_norm[:, 2:], 
-    #                                        np.eye(3), cv2.RANSAC, 
-    #                                        threshold=params['inl_th'],
-    #                                        prob=params['conf'])
-    #     F = np.matmul(np.matmul(T2.T, E), T1)
+    elif method == 'vibesac-cuda':
+        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe_cuda(src_pts, dst_pts, 
+                                                                          params['inl_th'],
+                                                                          min_samples=7,
+                                                                          max_trials=params['maxiter'],
+                                                                          p_success=params['conf'],
+                                                                          use_prosac=prosac,
+                                                                          use_cuda_for_global=True)
     elif method  == 'pyransac':
         F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
                                                 px_th=params['inl_th'],
@@ -465,12 +450,6 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
             print ("Fail!", e)
             toc = time.perf_counter()
             return np.eye(3), np.array([False] * len(mask)), tic-toc
-    elif method  == 'sklearn-numba':
-        try:
-            F, mask_inl = skransac_numba(src_pts, dst_pts, 8, params['inl_th'], params['maxiter'], params['conf'])
-        except Exception as e:
-            print ("Fail!", e)
-            return np.eye(3), np.array([False] * len(mask))
     else:
         raise ValueError('Unknown method')
     toc = time.perf_counter()
@@ -483,6 +462,114 @@ def get_single_result(ms, m, method, params, w1 = None, h1 = None, w2 = None, h2
     return F, final_inliers, toc - tic
 
 
+def get_single_result_essential(ms, m, K1, K2,  method, params, w1 = None, h1 = None, w2 = None, h2  = None, prosac=False):
+    mask = ms <= params['match_th']
+    tentatives = m[mask]
+    tentative_idxs = np.arange(len(mask))[mask]
+    src_pts = tentatives[:, :2]
+    dst_pts = tentatives[:, 2:]
+    src_pts = normalize_keypoints(src_pts, K1)
+    dst_pts = normalize_keypoints(dst_pts, K2)
+    scores = ms[mask]
+    if tentatives.shape[0] <= 12:
+        return np.eye(3), np.array([False] * len(mask)), 0
+    tic = time.perf_counter()
+    if prosac:
+        from_best = np.argsort(scores)
+        tentatives = tentatives[from_best]
+        src_pts = src_pts[from_best]
+        dst_pts = dst_pts[from_best]
+        tentative_idxs = tentative_idxs[from_best]
+        scores = scores[from_best]
+    if method == 'cv2-ransac':
+        E, mask_inl = cv2.findEssentialMat(src_pts, dst_pts, np.eye(3),
+                                                cv2.RANSAC, 
+                                                threshold=params['inl_th'],
+                                                prob=params['conf'],
+                                                maxIters=params['maxiter'])
+    elif method == 'cv2-gc':
+        E, mask_inl = cv2.findEssentialMat(src_pts, dst_pts, np.eye(3),
+                                                cv2.USAC_ACCURATE, 
+                                                threshold=params['inl_th'],
+                                                prob=params['conf'],
+                                                maxIters=params['maxiter'])
+    elif method == 'cv2-magsac':
+        E, mask_inl = cv2.findEssentialMat(src_pts, dst_pts, np.eye(3),
+                                                cv2.USAC_MAGSAC, 
+                                                threshold=params['inl_th'],
+                                                prob=params['conf'],
+                                                maxIters=params['maxiter'])
+    elif method == 'poselib':
+        E, info = poselib.estimate_essential(src_pts, 
+                                                      dst_pts, {'max_epipolar_error': params['inl_th'], 
+                                                                'progressive_sampling': prosac,
+                                                                'max_iterations': params['maxiter'],
+                                                                'success_prob': params['conf'],
+                                                                }, {})
+        mask_inl = info['inliers']
+    elif method == 'pycolmap':
+        opts = pycolmap.RANSACOptions({'max_error': params['inl_th'], 
+                                       'max_num_trials': params['maxiter'],
+                                        'min_num_trials': min(1000, params['maxiter']),
+                                        'confidence': params['conf']})
+        res = pycolmap.estimate_essential_matrix(src_pts, dst_pts, opts)
+        mask_inl = res['inlier_mask']
+        E = res['E']
+    elif method == 'kornia-cpu':
+        BS = 512
+        max_iter_batch = params['maxiter'] // BS 
+        RR = KG.ransac.RANSAC(model_type='essential', inl_th = params['inl_th'], 
+                              confidence = params['conf'], 
+                              max_iter = max_iter_batch,
+                              batch_size = BS)
+        pts1 = torch.from_numpy(src_pts).view(-1, 2)
+        pts2 = torch.from_numpy(dst_pts).view(-1, 2)
+        #from torch.profiler import profile, ProfilerActivity, record_function
+        #with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        #    with record_function("model_inference"):
+        E, mask_inl = RR(pts1.float(), pts2.float())
+        #print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
+        #sys.exit()
+        E = E.detach().cpu().numpy().reshape(3,3)
+        mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
+    elif method == 'kornia-gpu':
+        BS = 1024
+        max_iter_batch = params['maxiter'] // BS 
+        RR = KG.ransac.RANSAC(model_type='essential', inl_th = params['inl_th'], 
+                              confidence = params['conf'], 
+                              max_iter = max_iter_batch,
+                              batch_size = BS)
+        pts1 = torch.from_numpy(src_pts).view(-1, 2).float().cuda()
+        pts2 = torch.from_numpy(dst_pts).view(-1, 2).float().cuda()
+        E, mask_inl = RR(pts1, pts2)
+        E = E.detach().cpu().numpy().reshape(3,3)
+        mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
+    elif method  == 'pygcransac':
+        w1 = int(m[:, 0].max()+10)
+        h1 = int(m[:, 1].max()+10)
+        w2 = int(m[:, 2].max()+10)
+        h2 = int(m[:, 3].max()+10)
+        probabilities = get_probabilities(tentatives, assumed_order=prosac)
+        
+        E, mask_inl = pygcransac.findEssentialMatrix(np.ascontiguousarray(tentatives), 
+                                                       h1, w1, w2, h2,
+                                                       probabilities,
+                                                       threshold=params['inl_th'],
+                                                       conf=params['conf'],
+                                                       max_iters = params['maxiter'],
+                                                       min_iters = min(50, params['maxiter']))
+    else:
+        raise ValueError('Unknown method')
+    toc = time.perf_counter()
+    final_inliers = np.array([False] * len(mask))
+    if E is not None:
+        for i, x in enumerate(mask_inl):
+            final_inliers[tentative_idxs[i]] = x
+    else:
+        E = np.eye(3)
+    return E, final_inliers, toc - tic
+
+
 def get_single_result_roma(m, method, params):
     tentatives = m
     tentative_idxs = np.arange(len(tentatives))
@@ -492,13 +579,13 @@ def get_single_result_roma(m, method, params):
     if tentatives.shape[0] <= 12:
         return np.eye(3), np.array([False] * len(tentatives)), 0
     tic = time.perf_counter()
-    if method == 'cv2f-ransac':
+    if method == 'cv2-ransac':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.RANSAC, 
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
-    elif method == 'cv2f-magsac':
+    elif method == 'cv2-magsac':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.USAC_MAGSAC, 
                                                 ransacReprojThreshold=params['inl_th'],
@@ -517,13 +604,13 @@ def get_single_result_roma(m, method, params):
         bansac_params.weights = 1 -np.array(scores)
         # BANSAC patches OpenCV, so we will use the original OpenCV function, but under bansac conda environment
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts,  bansac_params)
-    elif method == 'cv2f-gc':
+    elif method == 'cv2-gc':
         F, mask_inl = cv2.findFundamentalMat(src_pts, dst_pts, 
                                                 cv2.USAC_ACCURATE, 
                                                 ransacReprojThreshold=params['inl_th'],
                                                 confidence=params['conf'],
                                                 maxIters=params['maxiter'])
-    elif method == 'cv2f-magsac':
+    elif method == 'cv2-magsac':
         ransac_params = cv2.UsacParams()
         ransac_params.score = cv2.SCORE_METHOD_MAGSAC
         ransac_params.loMethod = cv2.LOCAL_OPTIM_SIGMA
@@ -562,7 +649,7 @@ def get_single_result_roma(m, method, params):
         F = F.detach().cpu().numpy().reshape(3,3)
         mask_inl = mask_inl.detach().cpu().numpy().reshape(-1)>0
     elif method == 'kornia-gpu':
-        BS = 512
+        BS = 1024
         max_iter_batch = params['maxiter'] // BS 
         RR = KG.ransac.RANSAC(model_type='fundamental_7pt', inl_th = params['inl_th'], 
                               confidence = params['conf'], 
@@ -580,6 +667,14 @@ def get_single_result_roma(m, method, params):
                                                                           max_trials=params['maxiter'],
                                                                           p_success=params['conf'],
                                                                           use_prosac=False)
+    elif method == 'vibesac-cuda':
+        F, mask_inl, best_inliers_count, best_score, trials = ransac_fundamental_loransac_numba_vibe_cuda(src_pts, dst_pts, 
+                                                                          params['inl_th'],
+                                                                          min_samples=7,
+                                                                          max_trials=params['maxiter'],
+                                                                          p_success=params['conf'],
+                                                                          use_prosac=False,
+                                                                          use_cuda_for_global=True)
     elif method  == 'pyransac':
         F, mask_inl = pydegensac.findFundamentalMatrix(src_pts, dst_pts, 
                                                 px_th=params['inl_th'],
@@ -684,15 +779,14 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
     keys = [k for k in matches.keys()]
     BATCH = 32 
     PRE_DISPATCH = "3*n_jobs"
-
-    if ('gpu' in method):
-        results = get_multi_resulst_compiled(matches_scores, matches, method, params, keys, prosac)
-        for i, k in enumerate(keys):
-            v = results[i]
-            out_model[k] = v[0]
-            inls[k] = v[1]
-            times[k] = v[2]
-    elif ('vsac' in method):
+    #num_cores=1
+    print (f"Running with num_cores = {num_cores}")
+    if 'kornia' in method: # compilation
+        for i,k in enumerate(tqdm(keys)):
+            v = get_single_result(matches_scores[k], matches[k], method, params, prosac=prosac)
+            if i>10:
+                break
+    if ('vsac' in method):
         results =[]
         for i,k in enumerate(tqdm(keys)):
             if i>1580:
@@ -703,7 +797,15 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
             out_model[k] = v[0]
             inls[k] = v[1]
             times[k] = v[2]
+    elif num_cores == 1:
+        results = [get_single_result(matches_scores[k], matches[k], method, params, prosac=prosac) for k in tqdm(keys)]
+        for i, k in enumerate(keys):
+            v = results[i]
+            out_model[k] = v[0]
+            inls[k] = v[1]
+            times[k] = v[2]
     else:
+        print (f"Running  in prarallel with num_cores = {num_cores}")
         results = Parallel(n_jobs=num_cores,
                            batch_size=BATCH,
                            backend="loky",
@@ -718,6 +820,74 @@ def create_F_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
     return out_model, inls, times
 
 
+def create_E_submission(IN_DIR, seq, method, params, num_cores, prosac=False):
+    out_model = {}
+    inls = {}
+    times = {}
+    matches = load_h5(f'{IN_DIR}/{seq}/matches.h5')
+    
+    K1 = load_h5(f'{IN_DIR}/{seq}/K1.h5')
+    K2 = load_h5(f'{IN_DIR}/{seq}/K2.h5')
+    if K1 is None:
+       K1_K2 = load_h5(f'{IN_DIR}/{seq}/K1_K2.h5') 
+       K1 = {k.split('-')[0]: K1_K2[k][0][0] for k in K1_K2.keys()}
+       K2 = {k.split('-')[1]: K1_K2[k][0][1] for k in K1_K2.keys()}
+       for k in K2.keys():
+           if k not in K1:
+               K1[k] = K2[k]
+       for k in K1.keys():
+           if k not in K2:
+               K2[k] = K1[k]
+       assert K1 is not None and K2 is not None
+    
+    matches_scores = load_h5(f'{IN_DIR}/{seq}/match_conf.h5')
+    keys = [k for k in matches.keys()]
+    BATCH = 32 
+    PRE_DISPATCH = "3*n_jobs"
+    #num_cores=1
+    print (f"Running with num_cores = {num_cores}")
+    if 'kornia' in method: # compilation
+        if 'gpu' in method:
+            num_cores = 1
+        for i,k in enumerate(tqdm(keys)):
+            k1, k2 = k.split('-')
+            v = get_single_result_essential(matches_scores[k], matches[k], K1[k1], K2[k2], method, params, prosac=prosac)
+            if i>10:
+                break
+    if ('vsac' in method):
+        results =[]
+        for i,k in enumerate(tqdm(keys)):
+            if i>1580:
+                print (f"{i=} {k=}, input:")
+                print (f'{matches[k]=}')
+            k1, k2 = k.split('-')
+            v = get_single_result_essential(matches_scores[k], matches[k], K1[k1], K2[k2], method, params, prosac=prosac)
+            results.append(v)
+            out_model[k] = v[0]
+            inls[k] = v[1]
+            times[k] = v[2]
+    elif num_cores == 1:
+        results = [get_single_result_essential(matches_scores[k], matches[k], K1[k.split('-')[0]], K2[k.split('-')[1]], method, params, prosac=prosac) for k in tqdm(keys)]
+        for i, k in enumerate(keys):
+            v = results[i]
+            out_model[k] = v[0]
+            inls[k] = v[1]
+            times[k] = v[2]
+    else:
+        print (f"Running  in prarallel with num_cores = {num_cores}")
+        results = Parallel(n_jobs=num_cores,
+                           batch_size=BATCH,
+                           backend="loky",
+                           prefer="processes",
+                           pre_dispatch=PRE_DISPATCH
+                           )(delayed(get_single_result_essential)(matches_scores[k], matches[k], K1[k.split('-')[0]], K2[k.split('-')[1]], method, params, prosac=prosac) for k in tqdm(keys))
+        for i, k in enumerate(keys):
+            v = results[i]
+            out_model[k] = v[0]
+            inls[k] = v[1]
+            times[k] = v[2]
+    return out_model, inls, times
+
 def create_F_submission_roma(IN_DIR, seq, method, params, num_cores):
     out_model = {}
     inls = {}
@@ -726,12 +896,22 @@ def create_F_submission_roma(IN_DIR, seq, method, params, num_cores):
     keys = [k for k in matches.keys()]
     BATCH = 32 
     PRE_DISPATCH = "3*n_jobs"
-    results = Parallel(n_jobs=num_cores,
+    print (f"Running with num_cores = {num_cores}")
+    if 'kornia' in method: # compilation
+        for i,k in enumerate(tqdm(keys)):
+            v = get_single_result_roma(matches[k], method, params)
+            if i>10:
+                break
+    if num_cores > 1:
+        results = Parallel(n_jobs=num_cores,
                            batch_size=BATCH,
                            backend="loky",
-                           prefer="processes",
-                           pre_dispatch=PRE_DISPATCH
-                           )(delayed(get_single_result_roma)(matches[k], method, params) for k in tqdm(keys))
+                            prefer="processes",
+                            pre_dispatch=PRE_DISPATCH
+                            )(delayed(get_single_result_roma)(matches[k], method, params) for k in tqdm(keys))
+    else:
+        results = [get_single_result_roma(matches[k], method, params) for k in tqdm(keys)]
+
     for i, k in enumerate(keys):
         v = results[i]
         out_model[k] = v[0]
@@ -740,7 +920,7 @@ def create_F_submission_roma(IN_DIR, seq, method, params, num_cores):
     return out_model, inls, times
 
 def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000, 
-                       match_th=0.85, prosac=False, force=False, data_dir='f_data', roma_data_dir=''):
+                       match_th=0.85, prosac=False, force=False, data_dir='f_data', problem='f', roma_data_dir=''):
     """
     Estimate fundamental matrices for a given split using the specified method.
     
@@ -754,6 +934,7 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
         prosac: Use PROSAC sampling (default: False)
         force: Force recompute if results exist (default: False)
         data_dir: Path to the data directory (default: 'f_data')
+        problem: Problem to run on (default: 'f')
         
     Returns:
         output_dir: Directory where results were saved
@@ -776,7 +957,6 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
         "PROSAC": prosac
     }
     
-    problem = 'f'
     use_roma = len(roma_data_dir) > 0
     OUT_DIR = get_output_dir(problem, split, method, params, use_roma=len(roma_data_dir) > 0)
     IN_DIR = os.path.join(data_dir, split) 
@@ -785,12 +965,13 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
     if not os.path.isdir(OUT_DIR):
         os.makedirs(OUT_DIR)
     try:
-        num_cores = int(len(os.sched_getaffinity(0)) * 0.9)
+        num_cores = int(len(os.sched_getaffinity(0)) * 0.4)
     except Exception as e: # macos likely
-        num_cores = int(os.cpu_count() *0.9)
+        num_cores = int(os.cpu_count() *0.4)
     if method == 'pvsac':
         num_cores = 4
-    
+    if 'gpu' in method:
+        num_cores = 1
     for run in range(NUM_RUNS):
         seqs = os.listdir(IN_DIR)
         for seq in seqs:
@@ -802,13 +983,20 @@ def estimate_dir_split(split, method, inlier_th=0.75, conf=0.999, maxiter=100000
                 print(f"Submission file {out_models_fname} already exists, skipping")
                 continue
             if use_roma:
-                models, inlier_masks, times = create_F_submission_roma(IN_DIR, seq, method, params, num_cores)
-            else:
-                if 'kornia' in method:
-                    with torch.inference_mode():
-                        models, inlier_masks, times = create_F_submission(IN_DIR, seq, method, params, num_cores, prosac)
+                print ("Running on RoMA features")
+                if problem == 'f':
+                    models, inlier_masks, times = create_F_submission_roma(IN_DIR, seq, method, params, num_cores)
+                elif problem == 'e':
+                    models, inlier_masks, times = create_E_submission_roma(IN_DIR, seq, method, params, num_cores)
                 else:
+                    raise ValueError(f'Unknown problem {problem}')
+            else:
+                if problem == 'f':  
                     models, inlier_masks, times = create_F_submission(IN_DIR, seq, method, params, num_cores, prosac)
+                elif problem == 'e':
+                    models, inlier_masks, times = create_E_submission(IN_DIR, seq, method, params, num_cores, prosac)
+                else:
+                    raise ValueError(f'Unknown problem {problem}')
             save_h5(models, out_models_fname)
             save_h5(inlier_masks, out_inliers_fname)
             save_h5(times, out_times_fname)
@@ -824,7 +1012,7 @@ if __name__ == '__main__':
         type=str,
         help='split to run on. Can be val or test') 
     parser.add_argument(
-        "--method", default='cv2f-ransac', type=str,
+        "--method", default='cv2-ransac', type=str,
         help=f'RANSAC method. Can be one of {SUPPORTED_METHODS}')
     parser.add_argument(
         "--inlier_th",
@@ -865,15 +1053,16 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    estimate_dir_split(
-        split=args.split,
-        method=args.method,
-        inlier_th=args.inlier_th,
-        conf=args.conf,
-        maxiter=args.maxiter,
-        match_th=args.match_th,
-        prosac=args.PROSAC,
-        force=args.force,
-        data_dir=args.data_dir,
-        roma_data_dir=args.roma_data_dir
-    )
+    with torch.no_grad():
+        estimate_dir_split(
+            split=args.split,
+            method=args.method,
+            inlier_th=args.inlier_th,
+            conf=args.conf,
+            maxiter=args.maxiter,
+            match_th=args.match_th,
+            prosac=args.PROSAC,
+            force=args.force,
+            data_dir=args.data_dir,
+            roma_data_dir=args.roma_data_dir
+        )
