@@ -40,9 +40,9 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
             inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 10.0]
         #elif 'vibe' in method:
         #    inl_ths = [ 0.75, 1.0, 1.5, 2.0 ]
-        elif method in [ 'cv2f-magsac']:
+        elif method in [ 'cv2-magsac']:
             inl_ths = [ 0.25 ]
-        elif method in [ 'cv2f-ransac']:
+        elif method in [ 'cv2-ransac']:
             inl_ths = [ 0.5 ]
         elif method in [ 'vibesac', 'vibesac-cuda']:
             inl_ths = [ 1.5 ]
@@ -66,11 +66,14 @@ def tune_hyperparameters(method, conf=0.999, maxiter=2000, prosac=False,
     use_roma = len(roma_data_dir) > 0
     if use_roma:
         match_ths = [0.8] # it doesn't matter,the is no snn in roma
+    match_ths = [0.8]
+    #inl_ths = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
+    inl_ths = [0.5]
     print(f"Searching hypers for {method}, conf={conf}, maxIters={maxiter}")
     
     res = {}
     if problem == 'e':
-        inl_ths = np.array(inl_ths) * 1e-4
+        inl_ths = np.array(inl_ths) * 1e-3
     for m_th in match_ths:
         for inl_th in inl_ths:
             key = f'{inl_th}_{m_th}'
@@ -227,7 +230,7 @@ if __name__ == '__main__':
         "--force", action='store_true',
         help='force recompute if results exist')
     parser.add_argument(
-        "--skip_submission", action='store_true',
+        "--skip-submission", action='store_true',
         help='skip submission')
     args = parser.parse_args()
     
@@ -237,11 +240,11 @@ if __name__ == '__main__':
         print(f"\n{'='*80}")
         print(f"Starting hyperparameter tuning for method: {method}")
         print(f"{'='*80}\n")
-        test_iters = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]
-        if 'sklearn' in method:
-            test_iters = [100, 200, 500, 1000, 2000, 5000]
-        if len(args.roma_data_dir)>0:
-            test_iters = [100, 200, 500, 1000, 2000]
+        test_iters = []#100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]
+        #if 'sklearn' in method:
+        #     test_iters = [100, 200, 500, 1000, 2000, 5000]
+        #if len(args.roma_data_dir)>0:
+        #    test_iters = [100, 200, 500, 1000, 2000]
         result = tune_hyperparameters(
             method=method,
             force=args.force,
@@ -253,7 +256,6 @@ if __name__ == '__main__':
             data_dir=args.data_dir,
             test_iters=test_iters,
             roma_data_dir=args.roma_data_dir,
-           # test_iters=[5000, 10000, 20000, 50000, 100000],
             test_confs=[0.99, 0.9999],
             skip_submission=args.skip_submission
         )

@@ -72,8 +72,8 @@ def evaluate_results(IN_DIR, seq, models, inliers, K1_K2_format=True, roma_dir='
         def process_match(k, m):
             img_id1 = k.split('-')[0].replace('.jpg','')
             img_id2 = k.split('-')[1].replace('.jpg','')
-            E_pred = None if matrix_type == 'F' else pred_models[k]
-            F_pred = None if matrix_type == 'E' else pred_models[k]
+            E_pred = None if matrix_type == 'f' else pred_models[k]
+            F_pred = None if matrix_type == 'e' else pred_models[k]
             return k, eval_single_result(R[img_id1], R[img_id2], T[img_id1], T[img_id2],
                                             m[inl_mask[k]], K[img_id1], K[img_id2],
                                             E_pred=E_pred, F_pred=F_pred)
@@ -90,8 +90,8 @@ def evaluate_results(IN_DIR, seq, models, inliers, K1_K2_format=True, roma_dir='
         for k, m in tqdm(matches.items()):
             img_id1 = k.split('-')[0].replace('.jpg','')
             img_id2 = k.split('-')[1].replace('.jpg','')
-            E_pred = None if matrix_type == 'F' else pred_models[k]
-            F_pred = None if matrix_type == 'E' else pred_models[k]
+            E_pred = None if matrix_type == 'f' else pred_models[k]
+            F_pred = None if matrix_type == 'e' else pred_models[k]
             ang_errors[k] = eval_single_result(R[img_id1], R[img_id2], T[img_id1], T[img_id2],
                                                 m[inl_mask[k]], K[img_id1], K[img_id2],
                                                 E_pred=E_pred, F_pred=F_pred)
@@ -265,7 +265,7 @@ if __name__ == '__main__':
         help='path to the data')
     parser.add_argument(
         "--num_runs",
-        default=None,
+        default=1,
         type=int,
         help='number of runs to evaluate. If not specified, defaults to 1 for val and 3 for test')
     parser.add_argument(

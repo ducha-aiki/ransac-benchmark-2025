@@ -149,9 +149,13 @@ def eval_essential_matrix(p1n, p2n, E, dR, dt):
 
     if p1n.shape[0] < 5:
         return np.pi, np.pi / 2
-
     if E.size > 0:
-        _, R, t, _ = cv2.recoverPose(E, p1n, p2n)
+        try:
+            _, R, t, _ = cv2.recoverPose(E.astype(np.float64), p1n.astype(np.float64), p2n.astype(np.float64))
+        except Exception as e:
+            print (f'Error in recoverPose: {e}')
+            print (E)
+            raise e
         try:
             err_q, err_t = evaluate_R_t(dR, dt, R, t)
         except:

@@ -21,44 +21,44 @@ import time
 try: 
     import pydegensac
 except Exception as e:
-    print ("pydegensac not found")
+    #print ("pydegensac not found")
     pass
 try:
     import poselib
 except Exception as e:
-    print ("poselib not found")
+    #print ("poselib not found")
     pass
 import kornia.geometry as KG
 try:
     import torch
     import kornia.geometry as KG
 except Exception as e:
-    print ("kornia not found")
+    #print ("kornia not found")
     pass
 try:
     import pvsac
 except Exception as e:
-    print ("pvsac not found")
+    #print ("pvsac not found")
     pass
 try:
     import pysuperansac
 except Exception as e:
-    print ("pysuperansac not found")
+    #print ("pysuperansac not found")
     pass
 try:
     import pycolmap
 except Exception as e:
-    print ("pycolmap not found")
+    #print ("pycolmap not found")
     pass
 try:
     import pygcransac
 except Exception as e:
-    print ("pygcransac not found")
+    #print ("pygcransac not found")
     pass
 try:
     import pymagsac
 except Exception as e:
-    print ("pymagsac not found")
+    #print ("pymagsac not found")
     pass
 try:
     from skimage.measure import ransac as skransac
@@ -66,13 +66,13 @@ try:
     from skimage7pt import FundamentalMatrixTransform7pt
     from skimage_numba import FundamentalMatrixTransform7pt as FundamentalMatrixTransform7pt_numba
 except Exception as e:
-    print ("skimage not found")
+    #print ("skimage not found")
     pass
 try:    
     from ransac_benchmark_imc.vibesac import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe
     from ransac_benchmark_imc.vibesac_cuda import ransac_fundamental_loransac_numba_refactored as ransac_fundamental_loransac_numba_vibe_cuda
 except Exception as e:
-    print ("numba not found, vibesac is not available")
+    #print ("numba not found, vibesac is not available")
     pass
 
 SUPPORTED_METHODS = ['kornia-cpu', 'kornia-cpu-compiled', 'kornia-gpu',
